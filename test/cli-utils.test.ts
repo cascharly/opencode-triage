@@ -4,47 +4,7 @@
 import assert from "node:assert"
 import { describe, it } from "node:test"
 
-// Re-implement stripJsoncComments here to test the logic
-function stripJsoncComments(text: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (escape) {
-      result += ch
-      escape = false
-      i++
-      continue
-    }
-    if (ch === "\\" && inString) {
-      result += ch
-      escape = true
-      i++
-      continue
-    }
-    if (ch === '"') {
-      inString = !inString
-      result += ch
-      i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "*") {
-      i += 2
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
-      i += 2
-      continue
-    }
-    result += ch
-    i++
-  }
-  return result
-}
+import { stripJsoncComments } from "../src/config.ts"
 
 describe("stripJsoncComments", () => {
   it("strips single-line comments", () => {

@@ -76,16 +76,13 @@ export async function discoverAllSkills(
 
         const result = await tryReadSkill(join(resolvedBase, entry.name))
         if (result && !seen.has(result.name)) {
-          try {
-            const content = await readFile(result.path, "utf-8")
-            totalBytesRead += Buffer.byteLength(content, "utf-8")
-            if (totalBytesRead > MAX_TOTAL_SKILL_SIZE) {
-              console.error("[opencode-triage] Total skill size exceeds 10MB limit — stopping discovery")
-              break
-            }
-          } catch { /* size check failed, continue */ }
+          totalBytesRead += result.size
+          if (totalBytesRead > MAX_TOTAL_SKILL_SIZE) {
+            console.error("[opencode-triage] Total skill size exceeds 10MB limit — stopping discovery")
+            break
+          }
           seen.add(result.name)
-          skills.push({ ...result, scope })
+          skills.push({ name: result.name, desc: result.desc, path: result.path, scope })
         }
       }
     } catch (err) {
@@ -112,11 +109,11 @@ export async function discoverAllSkills(
  * toggle on older OpenCode versions where hooks may not be available.
  *
  * @param skillDir - Absolute path to a skill subdirectory
- * @returns Parsed skill entry (without scope), or null if neither file exists
+ * @returns Parsed skill entry (without scope) with size, or null if neither file exists
  */
 async function tryReadSkill(
   skillDir: string
-): Promise<Omit<SkillEntry, "scope"> | null> {
+): Promise<(Omit<SkillEntry, "scope"> & { size: number }) | null> {
   const filenames = ["SKILL.md", "SKILL.md.disabled"]
   for (const fn of filenames) {
     const filePath = join(skillDir, fn)
@@ -124,7 +121,8 @@ async function tryReadSkill(
       const content = await readFile(filePath, "utf-8")
       const name = extractFrontmatter(content, "name") ?? basename(skillDir)
       const desc = extractFrontmatter(content, "description") ?? ""
-      return { name, desc, path: filePath }
+      const size = Buffer.byteLength(content, "utf-8")
+      return { name, desc, path: filePath, size }
     } catch { /* try next filename */ }
   }
   return null
@@ -142,10 +140,11 @@ async function tryReadSkill(
  */
 export async function readSkillContent(filePath: string): Promise<string> {
   try {
-    const content = await readFile(filePath, "utf-8")
-    if (content.length > MAX_SKILL_SIZE) {
+    const buf = await readFile(filePath)
+    if (buf.byteLength > MAX_SKILL_SIZE) {
       return `(skill content truncated: exceeds 1MB limit)`
     }
+    const content = buf.toString("utf-8")
     const clean = stripBOM(content)
     const bodyMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
     const body = bodyMatch ? bodyMatch[1].trim() : clean.trim()

@@ -43,7 +43,7 @@ Some content here.`
     assert.equal(extractFrontmatter(content, "description"), "Backup and restore databases")
   })
 
-  it("extracts first line of folded description (> syntax)", () => {
+  it("extracts all lines of folded description (> syntax)", () => {
     const content = `---
 name: my-skill
 description: >
@@ -51,9 +51,7 @@ description: >
   folded description
 ---
 Body.`
-    // With m flag, $ matches end-of-line, so multi-line folded blocks
-    // only capture the first line. This is a known limitation.
-    assert.equal(extractFrontmatter(content, "description"), "This is a long")
+    assert.equal(extractFrontmatter(content, "description"), "This is a long folded description")
   })
 
   it("returns null when key missing", () => {

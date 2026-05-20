@@ -333,7 +333,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
               searchSuperpowers(),
             ])
             const combined = [skillsSh, superpowers].filter(Boolean).join("")
-            return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}`
+            const urls = [
+              "https://skills.sh/",
+              "https://github.com/obra/superpowers",
+            ].join("\n  ")
+            return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}\n\nResources:\n  ${urls}`
           }
 
           // Confidence gap: top match vs runner-up. Large gap = clear winner

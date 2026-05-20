@@ -5,6 +5,19 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] — 2026-05-20
+
+### Changed
+
+- **Skill discovery optimized** — reduced disk I/O by caching and retrieving file sizes during the initial discovery scan, cutting filesystem reads in half.
+- **Test suite cleanup** — deduplicated `stripJsoncComments` unit test code in `test/cli-utils.test.ts` by importing directly from `src/config.ts`.
+
+### Fixed
+
+- **YAML folded description parser** — resolved a bug in multi-line frontmatter parser (`>`) to successfully extract complete multi-line descriptions instead of truncating them.
+- **UTF-8 safe size enforcement** — replaced character length checks with strict buffer byte-length checks for the 1MB single-file size ceiling.
+- **Simulation script imports** — restored correct imports in `scripts/simulate.ts` that previously pointed to non-existent paths.
+
 ## [1.3.3] — 2026-05-16
 
 ### Added
