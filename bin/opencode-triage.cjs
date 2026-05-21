@@ -59,15 +59,9 @@ const GLOBAL_CFG_PATH = path.join(HOMEDIR, ".config", "opencode", "opencode.json
 const GLOBAL_CMD_DIR  = path.join(HOMEDIR, ".config", "opencode", "commands")
 const GLOBAL_CMD_FILE = path.join(GLOBAL_CMD_DIR, "triage.md")
 
-const SKILL_DIRS = [
-  { base: path.join(WORKTREE, ".agent", "skills"), label: ".agent/", scope: "project" },
-  { base: path.join(WORKTREE, ".agents", "skills"), label: ".agents/", scope: "project" },
-  { base: path.join(WORKTREE, ".claude", "skills"), label: ".claude/", scope: "project" },
-  { base: path.join(WORKTREE, ".opencode", "skills"), label: ".opencode/", scope: "project" },
-  { base: path.join(HOMEDIR, ".agents", "skills"), label: "~/.agents/", scope: "global" },
-  { base: path.join(HOMEDIR, ".claude", "skills"), label: "~/.claude/", scope: "global" },
-  { base: path.join(HOMEDIR, ".config", "opencode", "skills"), label: "~/.config/opencode/", scope: "global" },
-]
+// Single source of truth: shared with src/discovery.ts — both stay in sync
+const { buildLocations } = require("./skill-dirs.cjs")
+const SKILL_DIRS = buildLocations(WORKTREE, HOMEDIR)
 
 const YELLOW = "\x1b[33m"
 const GREEN = "\x1b[32m"

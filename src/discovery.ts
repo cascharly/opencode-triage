@@ -14,32 +14,30 @@
 
 import { homedir } from "node:os"
 import { join, basename } from "node:path"
+import { createRequire } from "node:module"
 import { readdir, realpath, rename, readFile } from "node:fs/promises"
 import { MAX_SKILL_SIZE, MAX_TOTAL_SKILL_SIZE } from "./config.ts"
 import type { SkillEntry } from "./config.ts"
 import { extractFrontmatter, stripBOM, isValidSkillName, sanitizeSkillContent } from "./utils.ts"
 
+const require = createRequire(import.meta.url)
+const { buildLocations } = require("../bin/skill-dirs.cjs")
+
 /**
  * Builds the list of directories to scan for skill files.
  *
+ * Delegates to bin/skill-dirs.cjs — the single source of truth for scan paths.
+ * The CLI (bin/opencode-triage.cjs) consumes the same module, ensuring parity.
+ *
  * Searches both project-level (.agent/, .agents/, .claude/, .opencode/)
- * and global (~/.agents/, ~/.claude/, ~/.config/opencode/) skills directories.
- * Project skills take precedence over global skills of the same name.
+ * and global (~/.agents/, ~/.claude/, ~/.config/opencode/, ~/.gemini/config/)
+ * skills directories. Project skills take precedence over global of the same name.
  *
  * @param worktree - Git worktree root or current working directory
  * @returns Array of {base, scope} pairs to scan
  */
 export function buildSkillLocations(worktree: string) {
-  return [
-    { base: join(worktree, ".agent", "skills"), scope: "project" as const },
-    { base: join(worktree, ".agents", "skills"), scope: "project" as const },
-    { base: join(worktree, ".claude", "skills"), scope: "project" as const },
-    { base: join(worktree, ".opencode", "skills"), scope: "project" as const },
-    { base: join(homedir(), ".agents", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".claude", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".config", "opencode", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".gemini", "config", "skills"), scope: "global" as const },
-  ]
+  return buildLocations(worktree, homedir()) as { base: string; scope: "project" | "global" }[]
 }
 
 /**
