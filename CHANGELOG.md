@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.3.4] — 2026-05-20
 
+### Added
+
+- **Shared skill directories module** — introduced a central source of truth (`bin/skill-dirs.cjs`) containing standard skill directory subpaths and a resolver function, shared between the CLI and the plugin.
+
 ### Changed
 
 - **Skill discovery optimized** — reduced disk I/O by caching and retrieving file sizes during the initial discovery scan, cutting filesystem reads in half.
@@ -14,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CLI-plugin discovery synchronization** — resolved a discovery discrepancy where the `/triage status` command missed skills located in the `~/.gemini/config/skills/` directory by aligning the CLI scan paths with the runtime plugin router via the shared locations module.
 - **YAML folded description parser** — resolved a bug in multi-line frontmatter parser (`>`) to successfully extract complete multi-line descriptions instead of truncating them.
 - **UTF-8 safe size enforcement** — replaced character length checks with strict buffer byte-length checks for the 1MB single-file size ceiling.
 - **Simulation script imports** — restored correct imports in `scripts/simulate.ts` that previously pointed to non-existent paths.
