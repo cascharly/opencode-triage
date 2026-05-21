@@ -127,6 +127,6 @@ export function sanitizeSkillContent(content: string): string {
     .replace(/<embed[\s\S]*?<\/embed>/gi, "[embed removed]")
     .replace(/<form[\s\S]*?<\/form>/gi, "[form removed]")
     .replace(/<meta\s+http-equiv=["']?refresh["']?[^>]*>/gi, "[meta refresh removed]")
-    .replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "[event handler removed]")
+    .replace(/\bon\w+\s*=\s*(?:["'][^"']*["']|[^\s>]+)/gi, "[event handler removed]")
     .replace(/javascript\s*:/gi, "[javascript uri removed]")
 }

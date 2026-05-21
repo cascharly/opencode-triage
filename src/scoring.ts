@@ -124,6 +124,14 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
     idf[w] = 1 + Math.log(skills.length / (df[w] || 1))
   }
 
+  // S2: pre-compute stem for each query word once, outside the per-skill loop.
+  // Previously stem(word) was called once per word per skill — O(words × skills).
+  // Now it is O(words) total. Identical outputs, eliminates redundant computation.
+  const wordStems: Record<string, string> = {}
+  for (const w of words) {
+    wordStems[w] = stem(w)
+  }
+
   return skills.map(skill => {
     const nameLower = skill.name.toLowerCase()
     const descLower = skill.desc.toLowerCase()
@@ -155,7 +163,7 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
       const word = words[i]
       const positionWeight = Math.pow(POSITION_DECAY, i)
       const bonus = getWordBonus(word, descLower)
-      const stemBonus = getWordBonus(stem(word), stemmedDescLower)
+      const stemBonus = getWordBonus(wordStems[word], stemmedDescLower)
       const effectiveBonus = Math.max(bonus, stemBonus)
       if (effectiveBonus > 0) {
         const points = DESC_WEIGHT * effectiveBonus * idf[word] * positionWeight

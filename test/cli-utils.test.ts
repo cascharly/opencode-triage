@@ -3,7 +3,10 @@
  */
 import assert from "node:assert"
 import { describe, it } from "node:test"
+import { createRequire } from "node:module"
 
+const require = createRequire(import.meta.url)
+const shared = require("../bin/shared.cjs")
 import { stripJsoncComments } from "../src/config.ts"
 
 describe("stripJsoncComments", () => {
@@ -59,3 +62,36 @@ describe("stripJsoncComments", () => {
     assert.strictEqual(stripJsoncComments(input), input)
   })
 })
+
+describe("shared.cjs utilities", () => {
+  it("exports stripJsoncComments matching src/config version", () => {
+    const input = `{\n  "key": "value", // this is a comment\n  "other": 1\n}`
+    assert.strictEqual(shared.stripJsoncComments(input), stripJsoncComments(input))
+  })
+
+  it("exports levenshtein that calculates distance correctly", () => {
+    assert.strictEqual(shared.levenshtein("cat", "cat"), 0)
+    assert.strictEqual(shared.levenshtein("cat", "bat"), 1)
+    assert.strictEqual(shared.levenshtein("kitten", "sitting"), 3)
+  })
+
+  it("exports semverGt that compares semver correctly", () => {
+    assert.strictEqual(shared.semverGt("1.2.3", "1.2.2"), true)
+    assert.strictEqual(shared.semverGt("1.2.3", "1.2.3"), false)
+    assert.strictEqual(shared.semverGt("1.3.0", "1.2.9"), true)
+    assert.strictEqual(shared.semverGt("2.0.0", "1.9.9"), true)
+    assert.strictEqual(shared.semverGt("1.10.0", "1.9.0"), true)
+  })
+
+  it("exports extractFrontmatterField that parses field correctly", () => {
+    const content = `---
+name: backup-restore
+description: Backup and restore databases
+---
+Body text`
+    assert.strictEqual(shared.extractFrontmatterField(content, "name"), "backup-restore")
+    assert.strictEqual(shared.extractFrontmatterField(content, "description"), "Backup and restore databases")
+    assert.strictEqual(shared.extractFrontmatterField(content, "missing"), null)
+  })
+})
+

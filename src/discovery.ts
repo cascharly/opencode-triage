@@ -38,6 +38,7 @@ export function buildSkillLocations(worktree: string) {
     { base: join(homedir(), ".agents", "skills"), scope: "global" as const },
     { base: join(homedir(), ".claude", "skills"), scope: "global" as const },
     { base: join(homedir(), ".config", "opencode", "skills"), scope: "global" as const },
+    { base: join(homedir(), ".gemini", "config", "skills"), scope: "global" as const },
   ]
 }
 

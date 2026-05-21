@@ -87,6 +87,16 @@ export const POSITION_DECAY = 0.9
  */
 export const SCOPE_BONUS = 5
 
+/**
+ * Skills permanently excluded from routing, regardless of any user configuration.
+ * "triage" must always be excluded to prevent infinite self-referencing loops
+ * where the LLM routes to the triage skill itself recursively.
+ *
+ * This set cannot be overridden by OPENCODE_TRIAGE_EXCLUDED — that env var
+ * can only add additional exclusions on top of this invariant set.
+ */
+export const ALWAYS_EXCLUDED_SKILLS = new Set(["triage"])
+
 // ── Type definitions ───────────────────────────────────────
 
 /**

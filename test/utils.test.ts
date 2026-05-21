@@ -448,3 +448,38 @@ describe("scoring scenarios", () => {
     assert.equal(sorted[0].scope, "project")
   })
 })
+
+// ── sanitizeSkillContent ──────────────────────────────────
+
+describe("sanitizeSkillContent", () => {
+  it("removes script tags", () => {
+    const raw = "hello <script>alert(1)</script> world"
+    assert.equal(sanitizeSkillContent(raw), "hello [script removed] world")
+  })
+
+  it("removes iframe tags", () => {
+    const raw = "hello <iframe src='hack'></iframe> world"
+    assert.equal(sanitizeSkillContent(raw), "hello [iframe removed] world")
+  })
+
+  it("removes quoted event handler attributes", () => {
+    const raw = '<div onclick="alert(1)" class="button">click me</div>'
+    assert.equal(sanitizeSkillContent(raw), '<div [event handler removed] class="button">click me</div>')
+  })
+
+  it("removes unquoted event handler attributes", () => {
+    const raw = '<div onclick=alert(1) class=button>click me</div>'
+    assert.equal(sanitizeSkillContent(raw), '<div [event handler removed] class=button>click me</div>')
+  })
+
+  it("removes javascript URIs", () => {
+    const raw = '<a href="javascript:alert(1)">click me</a>'
+    assert.equal(sanitizeSkillContent(raw), '<a href="[javascript uri removed]alert(1)">click me</a>')
+  })
+
+  it("does not remove safe attributes or content", () => {
+    const raw = '<div class="btn" data-id="123">hello</div>'
+    assert.equal(sanitizeSkillContent(raw), raw)
+  })
+})
+

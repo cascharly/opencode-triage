@@ -26,7 +26,7 @@ import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { THRESHOLD, checkTriageState } from "./config.ts"
+import { THRESHOLD, ALWAYS_EXCLUDED_SKILLS, checkTriageState } from "./config.ts"
 import type { SkillEntry } from "./config.ts"
 
 const require = createRequire(import.meta.url)
@@ -129,7 +129,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     const now = Date.now()
     if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
       const locations = buildSkillLocations(worktree)
-      cache = { skills: await discoverAllSkills(locations, getExcludedSkills), timestamp: now }
+      // S1: timestamp recorded AFTER discovery completes so the full CACHE_TTL_MS
+      // starts from when data is ready, not when the request was initiated
+      const skills = await discoverAllSkills(locations, getExcludedSkills)
+      cache = { skills, timestamp: Date.now() }
     }
     return cache.skills
   }
@@ -150,13 +153,15 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     return triageStateCache.state
   }
 
-  // Exclude the triage skill itself — self-referencing would create infinite loops
-  // Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
-  // Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
+  // ALWAYS_EXCLUDED_SKILLS is the immutable invariant — "triage" can never be routed to.
+  // OPENCODE_TRIAGE_EXCLUDED can add additional exclusions on top, but cannot remove
+  // entries from ALWAYS_EXCLUDED_SKILLS. This guarantees no infinite self-referencing loops
+  // regardless of user configuration.
   const getExcludedSkills = (): Set<string> => {
     const env = process.env.OPENCODE_TRIAGE_EXCLUDED
-    if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
-    return new Set(["triage"])
+    if (!env) return ALWAYS_EXCLUDED_SKILLS
+    const extra = env.split(",").map(s => s.trim()).filter(Boolean)
+    return new Set([...ALWAYS_EXCLUDED_SKILLS, ...extra])
   }
 
   // Definition hook state tracking
@@ -189,23 +194,29 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   // Do NOT restore .disabled files here — wait for hooks to confirm support.
   // If hooks fire, remigrateIfHooksDetected() restores them.
   // If hooks don't fire, skills stay hidden via .disabled files (file-rename fallback).
+  // W2: wrapped in try/catch to prevent unhandled promise rejection from crashing
+  // the plugin host if getTriageState() or getCachedSkills() throws on startup
   ;(async () => {
-    const state = await getTriageState()
-    if (state === "on") {
-      const skills = await getCachedSkills()
-      const projectN = skills.filter(s => s.scope === "project").length
-      const globalN = skills.filter(s => s.scope === "global").length
-      if (projectN > 0 || globalN > 0) {
+    try {
+      const state = await getTriageState()
+      if (state === "on") {
+        const skills = await getCachedSkills()
+        const projectN = skills.filter(s => s.scope === "project").length
+        const globalN = skills.filter(s => s.scope === "global").length
+        if (projectN > 0 || globalN > 0) {
+          await client.tui.showToast({
+            body: { message: `${projectN + globalN} skill(s) managed by triage`, variant: "info" },
+          })
+        }
+      } else if (state === "unknown") {
         await client.tui.showToast({
-          body: { message: `${projectN + globalN} skill(s) managed by triage`, variant: "info" },
+          body: { message: `Triage installed — run /triage on to enable`, variant: "warning" },
         })
       }
-    } else if (state === "unknown") {
-      await client.tui.showToast({
-        body: { message: `Triage installed — run /triage on to enable`, variant: "warning" },
-      })
+      checkForUpdate(client.tui)
+    } catch (err) {
+      console.error("[opencode-triage] Startup error:", err)
     }
-    checkForUpdate(client.tui)
   })()
 
   return {
