@@ -64,6 +64,10 @@ describe("stripJsoncComments", () => {
 })
 
 describe("shared.cjs utilities", () => {
+  // stripJsoncComments is duplicated in bin/shared.cjs and src/config.ts by necessity:
+  // the CLI is a standalone CommonJS script (#!/usr/bin/env node, no build step) and
+  // cannot import ESM/TypeScript modules at runtime. This test ensures the two copies
+  // never diverge — if one is changed, the other must match or CI will fail.
   it("exports stripJsoncComments matching src/config version", () => {
     const input = `{\n  "key": "value", // this is a comment\n  "other": 1\n}`
     assert.strictEqual(shared.stripJsoncComments(input), stripJsoncComments(input))

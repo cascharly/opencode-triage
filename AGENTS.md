@@ -20,7 +20,8 @@ No test runner, no linter, no formatter config. No tsconfig.json in repo.
 
 ## Architecture
 
-- Scans 6 directories: `.agent/skills/`, `.claude/skills/`, `.opencode/skills/` (project) + `~/.agents/skills/`, `~/.claude/skills/`, `~/.config/opencode/skills/` (global)
+- Scans 8 directories: `.agent/skills/`, `.agents/skills/`, `.claude/skills/`, `.opencode/skills/` (project) + `~/.agents/skills/`, `~/.claude/skills/`, `~/.config/opencode/skills/`, `~/.gemini/config/skills/` (global)
+- Pure Bun plugin architecture — operates entirely dynamically using system prompt and tool transformation hooks; does not require or load any standalone fallback router skill.
 - Reads `SKILL.md` files directly — `.disabled` suffix is fallback for older OpenCode
 - Hides skills from LLM via 3-layer hook defense: `tool.definition` (modifies `skill` tool description) → `experimental.chat.system.transform` (strips `<available_skills>` from system prompt) → `tool.execute.before` (intercepts stray calls)
 - CLI file rename (`SKILL.md` ↔ `SKILL.md.disabled`) remains as fallback when hooks unsupported

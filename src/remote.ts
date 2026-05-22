@@ -49,32 +49,14 @@ export async function searchRemoteSkills(query: string): Promise<string> {
 }
 
 /**
- * Searches the obra/superpowers GitHub repository for available skills.
+ * Returns a link to the obra/superpowers GitHub repository.
  *
- * Lists the top-level directories in the repository, which represent
- * individual skill packages. Returns up to 10 results with GitHub URLs.
+ * Previously queried the GitHub Contents API directly, but that consumed
+ * unauthenticated rate limit (60 req/hr) for a non-essential feature.
+ * Now returns a static pointer — the LLM can suggest the user check it.
  *
- * @returns Formatted string with superpowers suggestions, or empty string on failure
+ * @returns Formatted string pointing to the superpowers repo
  */
-export async function searchSuperpowers(): Promise<string> {
-  const url = "https://api.github.com/repos/obra/superpowers/contents"
-  try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 3000)
-    const res = await fetch(url, { signal: controller.signal })
-    clearTimeout(timer)
-    if (!res.ok) return ""
-    const contentType = res.headers.get("content-type") ?? ""
-    if (!contentType.includes("application/json")) return ""
-    const body = await res.json() as unknown
-    if (!Array.isArray(body)) return ""
-    const dirs = (body as Array<Record<string, unknown>>)
-      .filter(e => e.type === "dir" && typeof e.name === "string" && typeof e.html_url === "string")
-      .slice(0, 10)
-    if (dirs.length === 0) return ""
-    const lines = dirs.map(d => `  - ${d.name} (${d.html_url})`)
-    return "\n\nSuperpowers from obra/superpowers:\n" + lines.join("\n")
-  } catch {
-    return ""
-  }
+export function searchSuperpowers(): string {
+  return "\n\nSuperpowers from obra/superpowers:\n  Visit https://github.com/obra/superpowers"
 }

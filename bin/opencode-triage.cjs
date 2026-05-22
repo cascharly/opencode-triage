@@ -199,6 +199,14 @@ function setPluginMode(plugin, mode) {
 }
 
 // ── Collect skills data (shared by status, compare, toggle) ──
+//
+// Warning 6 note: collectSkills() mirrors the traversal logic in src/discovery.ts
+// but cannot import it directly. The CLI is a zero-build-step standalone CommonJS
+// script (#!/usr/bin/env node) with no TypeScript compilation, so it cannot consume
+// the ESM/TypeScript src/ modules at runtime. The directory paths themselves ARE
+// shared via bin/shared.cjs (which contains the directory layout) — the single source
+// of truth for scan locations. Only the traversal boilerplate is duplicated; any change
+// to which directories are scanned only needs to happen in the shared locations list.
 
 function collectSkills() {
   const skills = []

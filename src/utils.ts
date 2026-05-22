@@ -29,44 +29,6 @@ export function stripBOM(content: string): string {
   return content
 }
 
-/**
- * Extracts a value from YAML frontmatter by key.
- *
- * Supports two frontmatter formats:
- *   1. Single-line: `description: Some text here`
- *   2. Folded block: `description: >` followed by indented lines
- *
- * Uses indexOf() instead of regex for the frontmatter boundary to avoid
- * catastrophic backtracking (ReDoS) on files with many `---` sequences.
- *
- * @param content - Full file content including frontmatter delimiters
- * @param key - The frontmatter key to extract (e.g. "name", "description")
- * @returns The extracted value, or null if the key is not found
- */
-export function extractFrontmatter(content: string, key: string): string | null {
-  const clean = stripBOM(content)
-  // Find the closing `---` delimiter. Start search at position 4
-  // (after the opening `---\n`) to avoid matching the opening delimiter.
-  const fmEnd = clean.indexOf("\n---", 4)
-  if (fmEnd === -1) return null
-  const fm = clean.slice(4, fmEnd)
-
-  // Try folded block syntax first: `key: >` followed by indented lines
-  // The regex captures everything after `>` until a non-indented line or end
-  const safeKey = escapeRegex(key)
-  const multiRe = new RegExp(`(?:^|\\r?\\n)${safeKey}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "s")
-  const multiMatch = fm.match(multiRe)
-  if (multiMatch) {
-    // Collapse multi-line folded text into a single space-separated line
-    return multiMatch[1].replace(/\n\s*/g, " ").trim()
-  }
-
-  // Fall back to single-line syntax: `key: value`
-  const singleRe = new RegExp(`^${safeKey}:\\s*(.+)$`, "m")
-  const singleMatch = fm.match(singleRe)
-  return singleMatch ? singleMatch[1].trim() : null
-}
-
 // ── Regex utilities ────────────────────────────────────────
 
 /**
@@ -81,6 +43,63 @@ export function extractFrontmatter(content: string, key: string): string | null 
  */
 export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")
+}
+
+// Module-level RegExp cache for extractFrontmatter.
+// The two patterns (folded-block "multiRe" and single-line "singleRe") only
+// differ by the escaped YAML key name — typically "name" and "description".
+// Caching by that string avoids re-compiling identical RegExp objects on every
+// skill discovery call (once per skill per query cycle).
+const _fmMultiReCache = new Map<string, RegExp>()
+const _fmSingleReCache = new Map<string, RegExp>()
+
+/**
+ * Extracts a value from YAML frontmatter by key.
+ *
+ * Supports two frontmatter formats:
+ *   1. Single-line: `description: Some text here`
+ *   2. Folded block: `description: >` followed by indented lines
+ *
+ * Uses indexOf() instead of regex for the frontmatter boundary to avoid
+ * catastrophic backtracking (ReDoS) on files with many `---` sequences.
+ * The per-key RegExp patterns for value extraction are compiled once and
+ * cached at module level to eliminate redundant RegExp allocation per skill.
+ *
+ * @param content - Full file content including frontmatter delimiters
+ * @param key - The frontmatter key to extract (e.g. "name", "description")
+ * @returns The extracted value, or null if the key is not found
+ */
+export function extractFrontmatter(content: string, key: string): string | null {
+  const clean = stripBOM(content)
+  // Find the closing `---` delimiter. Start search at position 4
+  // (after the opening `---\n`) to avoid matching the opening delimiter.
+  const fmEnd = clean.indexOf("\n---", 4)
+  if (fmEnd === -1) return null
+  const fm = clean.slice(4, fmEnd)
+
+  // Try folded block syntax first: `key: >` followed by indented lines.
+  // The regex captures everything after `>` until a non-indented line or end.
+  // Compiled once per distinct key and reused on all subsequent calls.
+  const safeKey = escapeRegex(key)
+  let multiRe = _fmMultiReCache.get(safeKey)
+  if (!multiRe) {
+    multiRe = new RegExp(`(?:^|\\r?\\n)${safeKey}:\\s*>(.+?)(?=\\r?\\n\\S|$)`, "s")
+    _fmMultiReCache.set(safeKey, multiRe)
+  }
+  const multiMatch = fm.match(multiRe)
+  if (multiMatch) {
+    // Collapse multi-line folded text into a single space-separated line
+    return multiMatch[1].replace(/\n\s*/g, " ").trim()
+  }
+
+  // Fall back to single-line syntax: `key: value`
+  let singleRe = _fmSingleReCache.get(safeKey)
+  if (!singleRe) {
+    singleRe = new RegExp(`^${safeKey}:\\s*(.+)$`, "m")
+    _fmSingleReCache.set(safeKey, singleRe)
+  }
+  const singleMatch = fm.match(singleRe)
+  return singleMatch ? singleMatch[1].trim() : null
 }
 
 // ── Security ───────────────────────────────────────────────
@@ -100,7 +119,7 @@ export function escapeRegex(s: string): string {
  * @returns true if the name is safe to use, false if it should be skipped
  */
 export function isValidSkillName(name: string): boolean {
-  return name !== ".." && name !== "." && !name.includes("/") && !name.includes("\\")
+  return name !== ".." && name !== "." && !name.includes("/") && !name.includes("\\") && !name.includes("\0")
 }
 
 /**

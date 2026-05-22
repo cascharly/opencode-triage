@@ -4,5 +4,4 @@ dist/
 .opencode/
 .agents/
 .claude/
-tsconfig.json
 skills-lock.json

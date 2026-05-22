@@ -120,7 +120,7 @@ async function tryReadSkill(
       const content = await readFile(filePath, "utf-8")
       const name = extractFrontmatter(content, "name") ?? basename(skillDir)
       const desc = extractFrontmatter(content, "description") ?? ""
-      const size = Buffer.byteLength(content, "utf-8")
+      const size = Buffer.byteLength(name + desc, "utf-8")
       return { name, desc, path: filePath, size }
     } catch { /* try next filename */ }
   }
@@ -131,8 +131,10 @@ async function tryReadSkill(
  * Reads a skill file, strips YAML frontmatter, returns body content.
  *
  * Enforces a 1MB size limit to prevent memory exhaustion. Strips UTF-8
- * BOM for Windows compatibility. Returns error strings on failure rather
- * than throwing, so the triage tool always returns a usable string.
+ * BOM for Windows compatibility. Uses indexOf() for frontmatter boundary
+ * detection — consistent with extractFrontmatter and safe from ReDoS.
+ * Returns error strings on failure rather than throwing, so the triage
+ * tool always returns a usable string.
  *
  * @param filePath - Absolute path to SKILL.md or SKILL.md.disabled
  * @returns Body content without frontmatter, or an error string
@@ -145,8 +147,11 @@ export async function readSkillContent(filePath: string): Promise<string> {
     }
     const content = buf.toString("utf-8")
     const clean = stripBOM(content)
-    const bodyMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n*([\s\S]*)/)
-    const body = bodyMatch ? bodyMatch[1].trim() : clean.trim()
+    // Use indexOf to locate the body start — consistent with extractFrontmatter's
+    // boundary detection and safe from ReDoS unlike a regex approach.
+    // Frontmatter: `---\n...\n---\n` — find the closing delimiter starting at pos 4.
+    const fmEnd = clean.indexOf("\n---", 4)
+    const body = fmEnd !== -1 ? clean.slice(fmEnd + 4).trimStart() : clean.trim()
     return sanitizeSkillContent(body)
   } catch {
     return "(skill content unavailable)"

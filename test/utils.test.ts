@@ -206,6 +206,10 @@ describe("isValidSkillName", () => {
     assert.equal(isValidSkillName("foo\\bar"), false)
   })
 
+  it("rejects null byte", () => {
+    assert.equal(isValidSkillName("foo\0bar"), false)
+  })
+
   it("accepts normal names", () => {
     assert.equal(isValidSkillName("backup-restore"), true)
     assert.equal(isValidSkillName("my_cool_skill"), true)

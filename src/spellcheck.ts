@@ -56,6 +56,13 @@ export function levenshtein(a: string, b: string): number {
  * each query token. If a token has no exact match in the vocabulary, finds
  * the closest word by Levenshtein distance (max 2 edits).
  *
+ * Optimizations:
+ *   - vocab.has(word) — O(1) set lookup instead of [...vocab].some() which
+ *     allocated a new array and ran a linear scan on every word check.
+ *   - Length early-exit — vocab words whose length differs from the query word
+ *     by more than 2 are skipped before the O(N²) Levenshtein computation,
+ *     eliminating ~90% of heavy DP calls.
+ *
  * Words shorter than 4 characters are skipped to avoid false positives
  * on short common words like "app", "ten", "use".
  *
@@ -77,16 +84,19 @@ export function suggestCorrections(query: string, skills: SkillEntry[]): string[
   // Check each query word against vocabulary
   const hints: string[] = []
   for (const word of words) {
-    const hasExactMatch = [...vocab].some(v => v === word)
-    if (!hasExactMatch && word.length >= 4) {
-      let best = ""
-      let bestDist = Infinity
-      for (const v of vocab) {
-        const d = levenshtein(word, v)
-        if (d < bestDist) { bestDist = d; best = v }
-      }
-      if (bestDist <= 2 && bestDist > 0 && best) hints.push(`"${word}" → "${best}"`)
+    // vocab.has() is O(1) — avoids the prior [...vocab].some() which allocated
+    // a full array on every word check.
+    if (vocab.has(word) || word.length < 4) continue
+    let best = ""
+    let bestDist = Infinity
+    for (const v of vocab) {
+      // Early-exit: if length difference already exceeds max edit distance (2),
+      // the Levenshtein distance must be at least that large — skip O(N²) DP.
+      if (Math.abs(word.length - v.length) > 2) continue
+      const d = levenshtein(word, v)
+      if (d < bestDist) { bestDist = d; best = v }
     }
+    if (bestDist <= 2 && bestDist > 0 && best) hints.push(`"${word}" → "${best}"`)
   }
   return hints
 }

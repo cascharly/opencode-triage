@@ -22,6 +22,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { join } from "node:path"
+import { watch } from "node:fs"
 import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
@@ -35,17 +36,9 @@ const CURRENT_VERSION: string = (() => {
   catch { return "0.0.0" }
 })()
 
-function semverGt(a: string, b: string): boolean {
-  const pa = a.split(".").map(Number)
-  const pb = b.split(".").map(Number)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] ?? 0
-    const nb = pb[i] ?? 0
-    if (na > nb) return true
-    if (na < nb) return false
-  }
-  return false
-}
+// Suggestion 1: semverGt is now imported from the shared CJS utility module
+// instead of being duplicated here — single source of truth.
+const { semverGt } = require("../bin/shared.cjs") as { semverGt: (a: string, b: string) => boolean }
 
 async function checkForUpdate(tui: any): Promise<void> {
   try {
@@ -86,11 +79,14 @@ async function checkForUpdate(tui: any): Promise<void> {
  * as fallback for users on older OpenCode versions.
  */
 export const server: Plugin = async ({ worktree, client }, options) => {
-  // Cache: discovered skills per worktree, with timestamp for invalidation
-  // Fixes edge case #4: previously cache was never invalidated after CLI toggle,
-  // causing "skill content unavailable" errors until OpenCode restart
+  // Cache: discovered skills per worktree, with timestamp for TTL-based invalidation.
+  // Warning 5: Augmented with fs.watch directory watchers (set up below) that
+  // invalidate the cache immediately when skill files change on disk, so most
+  // triage calls hit the in-memory cache without any filesystem polling overhead.
+  // The 5s TTL is retained as a safe fallback for environments where fs.watch
+  // is unavailable or returns incomplete events (e.g. network drives, WSL).
   let cache: { skills: SkillEntry[]; timestamp: number } | null = null
-  const CACHE_TTL_MS = 5_000 // Re-discover every 5s to catch CLI toggles
+  const CACHE_TTL_MS = 5_000
 
   // Rate limiting: track triage calls to prevent excessive LLM tool usage
   // Mitigates unbounded consumption attacks (LLM010)
@@ -118,10 +114,12 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   }
 
   /**
-   * Returns cached skills, re-discovering if the cache has expired.
+   * Returns cached skills, re-discovering if the cache has expired or was
+   * invalidated by a fs.watch event.
    *
-   * Uses a time-based cache (5s TTL) to balance performance with
-   * responsiveness to file system changes (e.g., CLI toggles).
+   * Primary invalidation: fs.watch fires synchronously on file changes and
+   * sets cache to null. Fallback: 5s TTL for environments where watchers
+   * may not fire reliably (network filesystems, WSL, some CI containers).
    *
    * @returns Array of discovered skill entries
    */
@@ -136,6 +134,26 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     }
     return cache.skills
   }
+
+  // Warning 5: Watch all skill base directories for changes so the cache is
+  // invalidated the moment a skill file is added, removed, or renamed — rather
+  // than waiting up to 5s for the TTL. Watchers are best-effort: errors and
+  // unsupported paths are silently swallowed since the TTL covers the fallback.
+  ;(async () => {
+    try {
+      const locations = buildSkillLocations(worktree)
+      for (const { base } of locations) {
+        try {
+          watch(base, { recursive: true }, () => { cache = null })
+        } catch {
+          // Directory may not exist yet — watcher will not be set up for it.
+          // The 5s TTL fallback handles this case.
+        }
+      }
+    } catch {
+      // Ignore errors in watcher setup — TTL fallback is always present.
+    }
+  })()
 
   // Cache triage state so hooks don't re-read config files on every call
   let triageStateCache: { state: "on" | "off" | "unknown"; ts: number } | null = null

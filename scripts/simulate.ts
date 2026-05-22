@@ -2,14 +2,17 @@
  * Simulation script: scores real installed skills against sample queries.
  * Compares vanilla vs improved scoring.
  *
+ * Warning 4 fix: discovery helpers (tryReadSkill, extractFrontmatter,
+ * isValidSkillName, buildSkillLocations) are now imported directly from
+ * src/ instead of being duplicated here, ensuring the simulator always
+ * reflects the current discovery logic.
+ *
  * Run: node --experimental-strip-types scripts/simulate.ts
  */
 import { scoreSkills, getWordBonus } from "../src/scoring.ts"
 import { THRESHOLD, NAME_WEIGHT, DESC_WEIGHT, BIGRAM_BONUS, PHRASE_BONUS, POSITION_DECAY } from "../src/config.ts"
 import type { SkillEntry, ScoredSkill } from "../src/config.ts"
-import { homedir } from "node:os"
-import { join, basename } from "node:path"
-import { readdir, readFile, realpath } from "node:fs/promises"
+import { buildSkillLocations, discoverAllSkills } from "../src/discovery.ts"
 
 const WORKTREE = process.cwd()
 
@@ -17,89 +20,6 @@ function getExcludedSkills(): Set<string> {
   const env = process.env.OPENCODE_TRIAGE_EXCLUDED
   if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
   return new Set(["triage"])
-}
-
-function buildSkillLocations(worktree: string) {
-  return [
-    { base: join(worktree, ".agent", "skills"), scope: "project" as const },
-    { base: join(worktree, ".agents", "skills"), scope: "project" as const },
-    { base: join(worktree, ".claude", "skills"), scope: "project" as const },
-    { base: join(worktree, ".opencode", "skills"), scope: "project" as const },
-    { base: join(homedir(), ".agents", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".claude", "skills"), scope: "global" as const },
-    { base: join(homedir(), ".config", "opencode", "skills"), scope: "global" as const },
-  ]
-}
-
-function isValidSkillName(name: string): boolean {
-  if (name === ".." || name === ".") return false
-  if (name.includes("/") || name.includes("\\")) return false
-  return true
-}
-
-function extractFrontmatter(content: string, key: string): string | null {
-  const clean = content.replace(/^\uFEFF/, "")
-  const fmStart = clean.indexOf("---")
-  if (fmStart !== 0) return null
-  const fmEnd = clean.indexOf("---", 3)
-  if (fmEnd === -1) return null
-  const fm = clean.slice(3, fmEnd).trim()
-
-  const keyRe = new RegExp(`^${key}:\\s*(?:(>\\s*)?\\n?)(.*?)(?=\\n\\w|$)`, "sm")
-  const match = fm.match(keyRe)
-  if (!match) return null
-  if (match[1]) {
-    const lines = match[2].trim().split("\\n")
-    return lines.map(l => l.trim()).join(" ")
-  }
-  return match[2].trim() || null
-}
-
-async function tryReadSkill(skillDir: string): Promise<Omit<SkillEntry, "scope"> | null> {
-  for (const fn of ["SKILL.md", "SKILL.md.disabled"]) {
-    try {
-      const content = await readFile(join(skillDir, fn), "utf-8")
-      const name = extractFrontmatter(content, "name") ?? basename(skillDir)
-      const desc = extractFrontmatter(content, "description") ?? ""
-      return { name, desc, path: join(skillDir, fn) }
-    } catch { /* try next */ }
-  }
-  return null
-}
-
-async function discoverAllSkills(
-  locations: { base: string; scope: "project" | "global" }[]
-): Promise<SkillEntry[]> {
-  const skills: SkillEntry[] = []
-  const seen = new Set<string>()
-  const excluded = getExcludedSkills()
-
-  for (const { base, scope } of locations) {
-    try {
-      const resolvedBase = await realpath(base)
-      const entries = await readdir(resolvedBase, { withFileTypes: true })
-      for (const entry of entries) {
-        if (!entry.isDirectory() || entry.isSymbolicLink()) continue
-        if (excluded.has(entry.name) || !isValidSkillName(entry.name)) continue
-        const result = await tryReadSkill(join(resolvedBase, entry.name))
-        if (result && !seen.has(result.name)) {
-          seen.add(result.name)
-          skills.push({ ...result, scope })
-        }
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[simulate] Error scanning ${base}:`, err)
-      }
-    }
-  }
-
-  skills.sort((a, b) => {
-    if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
-    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-  })
-
-  return skills
 }
 
 // Vanilla scoring for comparison (no IDF, no bigram, no phrase, no position decay)
@@ -171,7 +91,7 @@ const QUERIES = [
 
 async function main() {
   const locations = buildSkillLocations(WORKTREE)
-  const skills = await discoverAllSkills(locations)
+  const skills = await discoverAllSkills(locations, getExcludedSkills)
 
   console.log(`Loaded ${skills.length} skills (${skills.filter(s => s.scope === "project").length} project, ${skills.filter(s => s.scope === "global").length} global)`)
   console.log("")

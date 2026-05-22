@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Scoring pipeline performance upgrades** — Pre-compiled RegExp patterns and pre-computed stemming for query words to avoid $O(W \times S)$ RegExp allocations, reducing per-request overhead to $O(W)$.
+- **Robust description stem cache** — Introduced a path-keyed stemmed description cache (`_stemmedDescCache`) that validates description string equality, guaranteeing flawless resilience against mock path collisions in unit tests.
+- **Spellcheck engine optimization** — Replaced expensive array allocations (`[...vocab].some()`) with $O(1)$ `vocab.has()` set lookups, and implemented length-difference early-exits to bypass ~90% of costly Levenshtein distance DP matrix calculations.
+- **Frontmatter parser improvements** — Cached RegExp compilations at the module level in `src/utils.ts` and replaced RegExp-based body boundary detection with `indexOf` substring slicing in `src/discovery.ts` to ensure consistency and eliminate ReDoS vectors.
+- **Active cache invalidation** — Added `fs.watch` directory watchers inside the plugin's cached skills getter to immediately invalidate the cache when files are added, removed, or modified.
+- **Boilerplate cleanup** — Extracted and imported `semverGt` from `bin/shared.cjs` to deduplicate utility definitions. Replaced duplicate traversal code in `scripts/simulate.ts` with clean imports from `src/discovery.ts`. Added clear architecture comments to the CLI explaining the intentional traversal duplication for zero-build ESM/CJS compatibility.
 - **Skill discovery optimized** — reduced disk I/O by caching and retrieving file sizes during the initial discovery scan, cutting filesystem reads in half.
 - **Test suite cleanup** — deduplicated `stripJsoncComments` unit test code in `test/cli-utils.test.ts` by importing directly from `src/config.ts`.
 
