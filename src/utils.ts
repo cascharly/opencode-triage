@@ -138,14 +138,21 @@ export function isValidSkillName(name: string): boolean {
  * @param content - Raw skill file content
  * @returns Sanitized content with dangerous patterns stripped
  */
+const SANITIZE_PATTERNS: [RegExp, string][] = [
+  [/<script[\s\S]*?<\/script>/gi, "[script removed]"],
+  [/<iframe[\s\S]*?<\/iframe>/gi, "[iframe removed]"],
+  [/<object[\s\S]*?<\/object>/gi, "[object removed]"],
+  [/<embed[\s\S]*?<\/embed>/gi, "[embed removed]"],
+  [/<form[\s\S]*?<\/form>/gi, "[form removed]"],
+  [/<meta\s+http-equiv=["']?refresh["']?[^>]*>/gi, "[meta refresh removed]"],
+  [/\bon\w+\s*=\s*(?:["'][^"']*["']|[^\s>]+)/gi, "[event handler removed]"],
+  [/javascript\s*:/gi, "[javascript uri removed]"],
+]
+
 export function sanitizeSkillContent(content: string): string {
-  return content
-    .replace(/<script[\s\S]*?<\/script>/gi, "[script removed]")
-    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "[iframe removed]")
-    .replace(/<object[\s\S]*?<\/object>/gi, "[object removed]")
-    .replace(/<embed[\s\S]*?<\/embed>/gi, "[embed removed]")
-    .replace(/<form[\s\S]*?<\/form>/gi, "[form removed]")
-    .replace(/<meta\s+http-equiv=["']?refresh["']?[^>]*>/gi, "[meta refresh removed]")
-    .replace(/\bon\w+\s*=\s*(?:["'][^"']*["']|[^\s>]+)/gi, "[event handler removed]")
-    .replace(/javascript\s*:/gi, "[javascript uri removed]")
+  let result = content
+  for (const [re, replacement] of SANITIZE_PATTERNS) {
+    result = result.replace(re, replacement)
+  }
+  return result
 }

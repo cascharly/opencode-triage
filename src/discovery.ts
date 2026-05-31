@@ -63,7 +63,7 @@ export async function discoverAllSkills(
   const excluded = getExcludedSkills()
   let totalBytesRead = 0
 
-  for (const { base, scope } of locations) {
+  locationLoop: for (const { base, scope } of locations) {
     try {
       const resolvedBase = await realpath(base)
       const entries = await readdir(resolvedBase, { withFileTypes: true })
@@ -78,7 +78,7 @@ export async function discoverAllSkills(
           totalBytesRead += result.size
           if (totalBytesRead > MAX_TOTAL_SKILL_SIZE) {
             console.error("[opencode-triage] Total skill size exceeds 10MB limit — stopping discovery")
-            break
+            break locationLoop
           }
           seen.add(result.name)
           skills.push({ name: result.name, desc: result.desc, path: result.path, scope })
@@ -117,10 +117,11 @@ async function tryReadSkill(
   for (const fn of filenames) {
     const filePath = join(skillDir, fn)
     try {
-      const content = await readFile(filePath, "utf-8")
+      const buf = await readFile(filePath)
+      const size = buf.byteLength
+      const content = buf.toString("utf-8")
       const name = extractFrontmatter(content, "name") ?? basename(skillDir)
       const desc = extractFrontmatter(content, "description") ?? ""
-      const size = Buffer.byteLength(name + desc, "utf-8")
       return { name, desc, path: filePath, size }
     } catch { /* try next filename */ }
   }

@@ -18,12 +18,12 @@
  * Returns all skills with computed scores. Caller filters for score > 0.
  *
  * Performance notes:
- *   - S1: IDF pre-computed outside the per-skill map loop.
- *   - S2: stem() pre-computed once per query word outside the per-skill loop.
- *   - S3: word-boundary RegExps compiled once per query word and reused across
- *         all skills — avoids O(words × skills) RegExp allocations per request.
- *   - S4: stemmed description built once per skill and cached by path — avoids
- *         re-running the Unicode word-replacement regex on every triage call.
+ *   - IDF pre-computed outside the per-skill map loop.
+ *   - stem() pre-computed once per query word outside the per-skill loop.
+ *   - Word-boundary RegExps compiled once per query word and reused across
+ *     all skills — avoids O(words × skills) RegExp allocations per request.
+ *   - Stemmed description built once per skill and cached by path — avoids
+ *     re-running the Unicode word-replacement regex on every triage call.
  */
 
 import {
@@ -62,7 +62,7 @@ export function stem(word: string): string {
   return word
 }
 
-// S4: Module-level cache for stemmed skill descriptions.
+// Module-level cache for stemmed skill descriptions.
 // Key: skill path (stable unique identifier). Value: object containing the
 // original description (to prevent collisions on mock paths in unit tests) and
 // the pre-computed stemmed description.
@@ -71,10 +71,12 @@ interface StemCacheEntry {
   stemmed: string
 }
 const _stemmedDescCache = new Map<string, StemCacheEntry>()
+const MAX_STEM_CACHE = 100
 
 /**
  * Returns the stemmed lowercase description for a skill, using a module-level
  * cache to avoid recomputing on every triage call.
+ * Evicts oldest entries when cache exceeds MAX_STEM_CACHE to cap memory.
  *
  * @param skill - The skill entry (path is used as the cache key)
  * @param descLower - Pre-lowercased description string
@@ -85,9 +87,11 @@ function getStemmedDesc(skill: SkillEntry, descLower: string): string {
   if (entry !== undefined && entry.desc === descLower) {
     return entry.stemmed
   }
-  // Replace each Unicode word token with its stemmed form.
-  // The lookbehind `(?<=\s)` + start-of-string anchor targets whole words only.
   const stemmed = descLower.replace(/(?:^|(?<=\s))[\p{L}\p{N}]+(?=\s|$)/gu, w => stem(w))
+  if (_stemmedDescCache.size >= MAX_STEM_CACHE) {
+    const oldest = _stemmedDescCache.keys().next().value
+    if (oldest !== undefined) _stemmedDescCache.delete(oldest)
+  }
   _stemmedDescCache.set(skill.path, { desc: descLower, stemmed })
   return stemmed
 }
@@ -103,12 +107,11 @@ function getStemmedDesc(skill: SkillEntry, descLower: string): string {
  * Word-boundary matches score higher because they indicate a more precise
  * semantic match. Substring matches catch related terms but are less specific.
  *
- * Accepts a pre-compiled RegExp to avoid allocating a new object on every call.
- * Called O(words × skills) times per triage request — the RegExp is compiled
- * once per query word in scoreSkills() and passed in here.
+ * For bulk scoring, scoreSkills() uses getWordBonusWithRe() with pre-compiled
+ * RegExp objects to avoid redundant allocations. This exported function
+ * creates its own RegExp per call for convenience.
  *
  * @param word - A single tokenized query word (already lowercased, punctuation stripped)
- * @param re - Pre-compiled word-boundary RegExp for this word
  * @param target - The skill name or description to match against (already lowercased)
  * @returns Score bonus: 15, 10, or 0
  */
@@ -127,6 +130,171 @@ function getWordBonusWithRe(re: RegExp, word: string, target: string): number {
   if (re.test(target)) return 15
   if (target.includes(word)) return 10
   return 0
+}
+
+interface ScoringContext {
+  words: string[]
+  idf: Record<string, number>
+  wordStems: Record<string, string>
+  wordRegexes: Record<string, RegExp>
+  stemRegexes: Record<string, RegExp>
+}
+
+function tokenizeQuery(query: string): string[] {
+  return query.toLowerCase()
+    .split(/\s+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter(w => w.length >= MIN_WORD_LENGTH)
+}
+
+function computeDF(words: string[], skills: SkillEntry[]): Record<string, number> {
+  const df: Record<string, number> = {}
+  for (const s of skills) {
+    const d = s.desc.toLowerCase()
+    for (const w of words) {
+      if (d.includes(w)) df[w] = (df[w] ?? 0) + 1
+    }
+  }
+  return df
+}
+
+function computeIDF(words: string[], skillCount: number, df: Record<string, number>): Record<string, number> {
+  const idf: Record<string, number> = {}
+  for (const w of words) {
+    idf[w] = 1 + Math.log(skillCount / (df[w] || 1))
+  }
+  return idf
+}
+
+function preComputeStems(words: string[]): Record<string, string> {
+  const stems: Record<string, string> = {}
+  for (const w of words) stems[w] = stem(w)
+  return stems
+}
+
+function preCompileRegexps(words: string[], stems: Record<string, string>): {
+  wordRegexes: Record<string, RegExp>
+  stemRegexes: Record<string, RegExp>
+} {
+  const wordRegexes: Record<string, RegExp> = {}
+  const stemRegexes: Record<string, RegExp> = {}
+  for (const w of words) {
+    wordRegexes[w] = new RegExp(`\\b${escapeRegex(w)}\\b`, "i")
+    stemRegexes[w] = new RegExp(`\\b${escapeRegex(stems[w])}\\b`, "i")
+  }
+  return { wordRegexes, stemRegexes }
+}
+
+function scoreNameMatches(
+  ctx: ScoringContext,
+  nameLower: string,
+): { score: number; matched: string[] } {
+  let score = 0
+  const matched: string[] = []
+  for (let i = 0; i < ctx.words.length; i++) {
+    const word = ctx.words[i]
+    const positionWeight = Math.pow(POSITION_DECAY, i)
+    const bonus = getWordBonusWithRe(ctx.wordRegexes[word], word, nameLower)
+    if (bonus > 0) {
+      score += NAME_WEIGHT * bonus * ctx.idf[word] * positionWeight
+      matched.push(`name:${word}`)
+    }
+  }
+  return { score, matched }
+}
+
+function scoreDescMatches(
+  ctx: ScoringContext,
+  descLower: string,
+  stemmedDescLower: string,
+): { score: number; descScore: number; matched: string[] } {
+  let score = 0
+  let descScore = 0
+  const matched: string[] = []
+  for (let i = 0; i < ctx.words.length; i++) {
+    const word = ctx.words[i]
+    const positionWeight = Math.pow(POSITION_DECAY, i)
+    const bonus = getWordBonusWithRe(ctx.wordRegexes[word], word, descLower)
+    const stemBonus = getWordBonusWithRe(ctx.stemRegexes[word], ctx.wordStems[word], stemmedDescLower)
+    const effectiveBonus = Math.max(bonus, stemBonus)
+    if (effectiveBonus > 0) {
+      const points = DESC_WEIGHT * effectiveBonus * ctx.idf[word] * positionWeight
+      score += points
+      descScore += points
+      matched.push(stemBonus > bonus ? `desc:stem:${word}` : `desc:${word}`)
+    }
+  }
+  return { score, descScore, matched }
+}
+
+function applyBigramBonus(
+  ctx: ScoringContext,
+  descLower: string,
+  nameTokenized: string,
+): { score: number; descScore: number; matched: string[] } {
+  let score = 0
+  let descScore = 0
+  const matched: string[] = []
+  for (let i = 0; i < ctx.words.length - 1; i++) {
+    const bigram = `${ctx.words[i]} ${ctx.words[i + 1]}`
+    if (descLower.includes(bigram)) {
+      score += BIGRAM_BONUS
+      descScore += BIGRAM_BONUS
+      matched.push(`bigram:${bigram}`)
+    } else if (nameTokenized.includes(bigram)) {
+      score += BIGRAM_BONUS
+      matched.push(`bigram:name:${bigram}`)
+    }
+  }
+  return { score, descScore, matched }
+}
+
+function applyPhraseBonus(
+  ctx: ScoringContext,
+  descLower: string,
+  nameLower: string,
+  nameTokenized: string,
+): { score: number; descScore: number; matched: string[] } {
+  for (const n of [5, 4, 3]) {
+    for (let i = 0; i <= ctx.words.length - n; i++) {
+      const phrase = ctx.words.slice(i, i + n).join(" ")
+      if (descLower.includes(phrase) || nameLower.includes(phrase) || nameTokenized.includes(phrase)) {
+        return { score: PHRASE_BONUS, descScore: PHRASE_BONUS, matched: [`phrase:${phrase}`] }
+      }
+    }
+  }
+  return { score: 0, descScore: 0, matched: [] }
+}
+
+function applyScopeBonus(skill: SkillEntry, score: number, matched: string[]): void {
+  if (skill.scope === "project" && score > 0) {
+    matched.push("scope:project")
+  }
+}
+
+function scoreSingleSkill(skill: SkillEntry, ctx: ScoringContext): ScoredSkill {
+  const nameLower = skill.name.toLowerCase()
+  const descLower = skill.desc.toLowerCase()
+  const nameTokenized = nameLower.replace(/[-_]/g, " ")
+  const stemmedDescLower = getStemmedDesc(skill, descLower)
+
+  const nameResult = scoreNameMatches(ctx, nameLower)
+  const descResult = scoreDescMatches(ctx, descLower, stemmedDescLower)
+  const bigramResult = applyBigramBonus(ctx, descLower, nameTokenized)
+  const phraseResult = applyPhraseBonus(ctx, descLower, nameLower, nameTokenized)
+
+  const score = nameResult.score + descResult.score + bigramResult.score + phraseResult.score +
+    (skill.scope === "project" && (nameResult.score + descResult.score + bigramResult.score + phraseResult.score) > 0 ? SCOPE_BONUS : 0)
+  const descScore = descResult.descScore + bigramResult.descScore + phraseResult.descScore
+  const matched = [
+    ...nameResult.matched,
+    ...descResult.matched,
+    ...bigramResult.matched,
+    ...phraseResult.matched,
+  ]
+  applyScopeBonus(skill, score, matched)
+
+  return { ...skill, score, descScore, matchedBy: matched.join(", ") }
 }
 
 /**
@@ -153,126 +321,14 @@ function getWordBonusWithRe(re: RegExp, word: string, target: string): number {
  * @returns All skills with computed scores (filter for score > 0 to get matches)
  */
 export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] {
-  // Tokenize: lowercase → split on whitespace → strip non-alphanumeric chars → filter short words
-  // Unicode letter/number classes (\p{L}\p{N}) support international queries
-  const words = query.toLowerCase()
-    .split(/\s+/)
-    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(w => w.length >= MIN_WORD_LENGTH)
-
+  const words = tokenizeQuery(query)
   if (words.length === 0) return []
 
-  // IDF: count how many skill descriptions contain each query word.
-  // Words appearing in many skills (e.g. "use", "guide") get downweighted.
-  // Rare words (e.g. "kubernetes", "boolean") get full or boosted weight.
-  const df: Record<string, number> = {}
-  for (const w of words) {
-    df[w] = skills.filter(s => s.desc.toLowerCase().includes(w)).length
-  }
+  const df = computeDF(words, skills)
+  const idf = computeIDF(words, skills.length, df)
+  const wordStems = preComputeStems(words)
+  const { wordRegexes, stemRegexes } = preCompileRegexps(words, wordStems)
 
-  // IDF: precompute inverse document frequency for each query word.
-  // Hoisted outside the per-skill loop since values are identical across skills.
-  const idf: Record<string, number> = {}
-  for (const w of words) {
-    idf[w] = 1 + Math.log(skills.length / (df[w] || 1))
-  }
-
-  // S2: pre-compute stem for each query word once, outside the per-skill loop.
-  // Previously stem(word) was called once per word per skill — O(words × skills).
-  // Now it is O(words) total. Identical outputs, eliminates redundant computation.
-  const wordStems: Record<string, string> = {}
-  for (const w of words) {
-    wordStems[w] = stem(w)
-  }
-
-  // S3: pre-compile word-boundary RegExps once per query word.
-  // getWordBonus() previously called `new RegExp(...)` on every invocation —
-  // O(words × skills × 2) allocations per triage request. Now we compile
-  // each pattern exactly once (O(words)) and reuse it across all skills.
-  const wordRegexes: Record<string, RegExp> = {}
-  const stemRegexes: Record<string, RegExp> = {}
-  for (const w of words) {
-    wordRegexes[w] = new RegExp(`\\b${escapeRegex(w)}\\b`, "i")
-    stemRegexes[w] = new RegExp(`\\b${escapeRegex(wordStems[w])}\\b`, "i")
-  }
-
-  return skills.map(skill => {
-    const nameLower = skill.name.toLowerCase()
-    const descLower = skill.desc.toLowerCase()
-    // Name with hyphens/underscores replaced by spaces so bigrams and phrases
-    // can match across tokens (e.g. "react native" hits "vercel-react-native-skills")
-    const nameTokenized = nameLower.replace(/[-_]/g, " ")
-    // S4: stemmed desc retrieved from module-level cache (built once per skill).
-    // Each word in the description is reduced to its base form so inflected variants
-    // match uninflected query words (refactoring→refactor, vulnerabilities→vulnerability).
-    const stemmedDescLower = getStemmedDesc(skill, descLower)
-    let score = 0
-    let descScore = 0
-    const matched: string[] = []
-
-    // Score name matches first (higher weight, with IDF + position)
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i]
-      const positionWeight = Math.pow(POSITION_DECAY, i)
-      const bonus = getWordBonusWithRe(wordRegexes[word], word, nameLower)
-      if (bonus > 0) {
-        score += NAME_WEIGHT * bonus * idf[word] * positionWeight
-        matched.push(`name:${word}`)
-      }
-    }
-
-    // Then score description matches (lower weight, with IDF + position).
-    // Falls back to stemmed desc so "vulnerability" matches "vulnerabilities",
-    // "refactor" matches "refactoring", etc. Takes the higher of the two bonuses.
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i]
-      const positionWeight = Math.pow(POSITION_DECAY, i)
-      const bonus = getWordBonusWithRe(wordRegexes[word], word, descLower)
-      const stemBonus = getWordBonusWithRe(stemRegexes[word], wordStems[word], stemmedDescLower)
-      const effectiveBonus = Math.max(bonus, stemBonus)
-      if (effectiveBonus > 0) {
-        const points = DESC_WEIGHT * effectiveBonus * idf[word] * positionWeight
-        score += points
-        descScore += points
-        matched.push(stemBonus > bonus ? `desc:stem:${word}` : `desc:${word}`)
-      }
-    }
-
-    // Bigram bonus: consecutive word pairs in description OR tokenized name.
-    // Name bigrams don't count toward descScore (they're name-level signals).
-    for (let i = 0; i < words.length - 1; i++) {
-      const bigram = `${words[i]} ${words[i + 1]}`
-      if (descLower.includes(bigram)) {
-        score += BIGRAM_BONUS
-        descScore += BIGRAM_BONUS
-        matched.push(`bigram:${bigram}`)
-      } else if (nameTokenized.includes(bigram)) {
-        score += BIGRAM_BONUS
-        matched.push(`bigram:name:${bigram}`)
-      }
-    }
-
-    // Exact phrase bonus: 3+ consecutive query words verbatim in desc, name, or tokenized name
-    for (const n of [5, 4, 3]) {
-      for (let i = 0; i <= words.length - n; i++) {
-        const phrase = words.slice(i, i + n).join(" ")
-        if (descLower.includes(phrase) || nameLower.includes(phrase) || nameTokenized.includes(phrase)) {
-          score += PHRASE_BONUS
-          descScore += PHRASE_BONUS
-          matched.push(`phrase:${phrase}`)
-          break
-        }
-      }
-      if (matched.some(m => m.startsWith("phrase:"))) break
-    }
-
-    // Scope tiebreaker: project skills are more relevant to current work.
-    // Only applied when the skill has matched something (score > 0).
-    if (skill.scope === "project" && score > 0) {
-      score += SCOPE_BONUS
-      matched.push("scope:project")
-    }
-
-    return { ...skill, score, descScore, matchedBy: matched.join(", ") }
-  })
+  const ctx: ScoringContext = { words, idf, wordStems, wordRegexes, stemRegexes }
+  return skills.map(skill => scoreSingleSkill(skill, ctx))
 }

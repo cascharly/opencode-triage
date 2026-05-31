@@ -36,9 +36,9 @@ const CURRENT_VERSION: string = (() => {
   catch { return "0.0.0" }
 })()
 
-// Suggestion 1: semverGt is now imported from the shared CJS utility module
-// instead of being duplicated here — single source of truth.
 const { semverGt } = require("../bin/shared.cjs") as { semverGt: (a: string, b: string) => boolean }
+
+const TOAST_VARIANTS = ["info", "success", "error", "warning"] as const
 
 async function checkForUpdate(tui: any): Promise<void> {
   try {
@@ -80,12 +80,15 @@ async function checkForUpdate(tui: any): Promise<void> {
  */
 export const server: Plugin = async ({ worktree, client }, options) => {
   // Cache: discovered skills per worktree, with timestamp for TTL-based invalidation.
-  // Warning 5: Augmented with fs.watch directory watchers (set up below) that
-  // invalidate the cache immediately when skill files change on disk, so most
-  // triage calls hit the in-memory cache without any filesystem polling overhead.
-  // The 5s TTL is retained as a safe fallback for environments where fs.watch
+  // Augmented with fs.watch directory watchers (set up below) that invalidate
+  // immediately when skill files change on disk, so most triage calls hit the
+  // in-memory cache without any filesystem polling overhead.
+  // The 5s TTL is retained as safe fallback for environments where fs.watch
   // is unavailable or returns incomplete events (e.g. network drives, WSL).
+  // Mutex prevents concurrent discovery when multiple triage calls arrive before
+  // discovery completes — subsequent calls await the in-flight promise.
   let cache: { skills: SkillEntry[]; timestamp: number } | null = null
+  let cacheMutex: Promise<void> | null = null
   const CACHE_TTL_MS = 5_000
 
   // Rate limiting: track triage calls to prevent excessive LLM tool usage
@@ -120,31 +123,49 @@ export const server: Plugin = async ({ worktree, client }, options) => {
    * Primary invalidation: fs.watch fires synchronously on file changes and
    * sets cache to null. Fallback: 5s TTL for environments where watchers
    * may not fire reliably (network filesystems, WSL, some CI containers).
+   * Mutex serializes concurrent calls — only one discovery runs at a time.
    *
    * @returns Array of discovered skill entries
    */
   async function getCachedSkills(): Promise<SkillEntry[]> {
     const now = Date.now()
-    if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
+    if (cache !== null && now - cache.timestamp <= CACHE_TTL_MS) {
+      return cache.skills
+    }
+    if (cacheMutex) {
+      await cacheMutex
+      return cache!.skills
+    }
+    cacheMutex = (async () => {
       const locations = buildSkillLocations(worktree)
-      // S1: timestamp recorded AFTER discovery completes so the full CACHE_TTL_MS
-      // starts from when data is ready, not when the request was initiated
       const skills = await discoverAllSkills(locations, getExcludedSkills)
       cache = { skills, timestamp: Date.now() }
+    })()
+    try {
+      await cacheMutex
+    } finally {
+      cacheMutex = null
     }
-    return cache.skills
+    return cache!.skills
   }
 
-  // Warning 5: Watch all skill base directories for changes so the cache is
+  // Watch all skill base directories for changes so the cache is
   // invalidated the moment a skill file is added, removed, or renamed — rather
   // than waiting up to 5s for the TTL. Watchers are best-effort: errors and
   // unsupported paths are silently swallowed since the TTL covers the fallback.
-  ;(async () => {
+  // Close previously created watchers before setting up new ones to prevent
+  // resource leaks on hot-reload or worktree change.
+  let watchers: ReturnType<typeof watch>[] = []
+  const setupWatchers = async () => {
+    for (const w of watchers) {
+      try { w.close() } catch { /* ignore close errors */ }
+    }
+    watchers = []
     try {
       const locations = buildSkillLocations(worktree)
       for (const { base } of locations) {
         try {
-          watch(base, { recursive: true }, () => { cache = null })
+          watchers.push(watch(base, { recursive: true }, () => { cache = null }))
         } catch {
           // Directory may not exist yet — watcher will not be set up for it.
           // The 5s TTL fallback handles this case.
@@ -153,7 +174,8 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     } catch {
       // Ignore errors in watcher setup — TTL fallback is always present.
     }
-  })()
+  }
+  setupWatchers()
 
   // Cache triage state so hooks don't re-read config files on every call
   let triageStateCache: { state: "on" | "off" | "unknown"; ts: number } | null = null
@@ -212,7 +234,7 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   // Do NOT restore .disabled files here — wait for hooks to confirm support.
   // If hooks fire, remigrateIfHooksDetected() restores them.
   // If hooks don't fire, skills stay hidden via .disabled files (file-rename fallback).
-  // W2: wrapped in try/catch to prevent unhandled promise rejection from crashing
+  // Wrapped in try/catch to prevent unhandled promise rejection from crashing
   // the plugin host if getTriageState() or getCachedSkills() throws on startup
   ;(async () => {
     try {
@@ -274,11 +296,9 @@ export const server: Plugin = async ({ worktree, client }, options) => {
            }).optional().describe("Optional: show a toast notification to the user"),
          },
         async execute(args, context) {
-          // Show optional toast notification
           if (args.toast) {
-            const validVariants = ["info", "success", "error", "warning"] as const
-            const variant = validVariants.includes(args.toast.variant as typeof validVariants[number])
-              ? (args.toast.variant as typeof validVariants[number])
+            const variant = TOAST_VARIANTS.includes(args.toast.variant as typeof TOAST_VARIANTS[number])
+              ? (args.toast.variant as typeof TOAST_VARIANTS[number])
               : "info"
             await client.tui.showToast({
               body: { message: args.toast.message, variant },
@@ -298,7 +318,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           }
 
           if (!checkTriageRateLimit()) {
-            return "Triage rate limit exceeded (20 calls/60s). Please wait before retrying."
+            await client.tui.showToast({
+              body: { message: "Triage rate limit exceeded (20 calls/60s). Please wait before retrying.", variant: "error" },
+            })
+            return "Triage rate limit exceeded. Please wait before retrying."
           }
 
           const query = (args.query ?? "").trim()
@@ -451,7 +474,8 @@ export const server: Plugin = async ({ worktree, client }, options) => {
       const result = output.output
       if (typeof result !== "string") return
       if (input.tool === "triage") {
-        const first = result.split("\n")[0] ?? ""
+        const newlineIdx = result.indexOf("\n")
+        const first = newlineIdx === -1 ? result : result.slice(0, newlineIdx)
         if (first.startsWith("SKILL ROUTED:")) {
           const skillName = first.replace("SKILL ROUTED:", "").trim()
           await client.tui.showToast({

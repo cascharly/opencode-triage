@@ -10,7 +10,11 @@
 
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
+import { createRequire } from "node:module"
+
+const require = createRequire(import.meta.url)
+const { stripJsoncComments: _stripJsoncComments } = require("../bin/shared.cjs")
 
 // ── Scoring constants ──────────────────────────────────────
 
@@ -139,28 +143,7 @@ export interface ScoredSkill extends SkillEntry {
  * @returns Clean JSON text ready for JSON.parse
  */
 export function stripJsoncComments(text: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (escape) { result += ch; escape = false; i++; continue }
-    if (ch === "\\" && inString) { result += ch; escape = true; i++; continue }
-    if (ch === '"') { inString = !inString; result += ch; i++; continue }
-    if (!inString && ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "*") {
-      i += 2
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
-      i += 2
-      continue
-    }
-    result += ch; i++
-  }
-  return result
+  return _stripJsoncComments(text)
 }
 
 /**
@@ -172,9 +155,9 @@ export function stripJsoncComments(text: string): string {
  * @param path - Absolute path to config file
  * @returns "on" if autoHide is true, "off" if false, "unknown" otherwise
  */
-export function getTriageStateFromPath(path: string): "on" | "off" | "unknown" {
+export async function getTriageStateFromPath(path: string): Promise<"on" | "off" | "unknown"> {
   try {
-    const raw = readFileSync(path, "utf-8")
+    const raw = await readFile(path, "utf-8")
     const json = JSON.parse(stripJsoncComments(raw))
     const plugin: unknown[] = json.plugin ?? []
     for (const p of plugin) {
@@ -210,7 +193,7 @@ export async function checkTriageState(
     join(homedir(), ".config", "opencode", "opencode.jsonc"),
   ]
   for (const p of paths) {
-    const state = getTriageStateFromPath(p)
+    const state = await getTriageStateFromPath(p)
     if (state !== "unknown") return state
   }
   return "unknown"
