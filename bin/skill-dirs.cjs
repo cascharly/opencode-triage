@@ -9,14 +9,14 @@
 const path = require("path")
 
 const DIR_PATTERNS = [
-  { subpath: [".agent", "skills"], scope: "project", label: ".agent/" },
-  { subpath: [".agents", "skills"], scope: "project", label: ".agents/" },
-  { subpath: [".claude", "skills"], scope: "project", label: ".claude/" },
-  { subpath: [".opencode", "skills"], scope: "project", label: ".opencode/" },
-  { subpath: [".agents", "skills"], scope: "global", label: "~/.agents/" },
-  { subpath: [".claude", "skills"], scope: "global", label: "~/.claude/" },
-  { subpath: [".config", "opencode", "skills"], scope: "global", label: "~/.config/opencode/" },
-  { subpath: [".gemini", "config", "skills"], scope: "global", label: "~/.gemini/config/" },
+  { subpath: [".agent", "skills"], scope: "project", label: ".agent/skills/" },
+  { subpath: [".agents", "skills"], scope: "project", label: ".agents/skills/" },
+  { subpath: [".claude", "skills"], scope: "project", label: ".claude/skills/" },
+  { subpath: [".opencode", "skills"], scope: "project", label: ".opencode/skills/" },
+  { subpath: [".agents", "skills"], scope: "global", label: "~/.agents/skills/" },
+  { subpath: [".claude", "skills"], scope: "global", label: "~/.claude/skills/" },
+  { subpath: [".config", "opencode", "skills"], scope: "global", label: "~/.config/opencode/skills/" },
+  { subpath: [".gemini", "config", "skills"], scope: "global", label: "~/.gemini/config/skills/" },
 ]
 
 /**
