@@ -215,6 +215,32 @@ describe("isValidSkillName", () => {
     assert.equal(isValidSkillName("my_cool_skill"), true)
     assert.equal(isValidSkillName("web-design"), true)
   })
+
+  it("rejects Windows reserved device names (CON, PRN, AUX, NUL)", () => {
+    assert.equal(isValidSkillName("CON"), false)
+    assert.equal(isValidSkillName("PRN"), false)
+    assert.equal(isValidSkillName("AUX"), false)
+    assert.equal(isValidSkillName("NUL"), false)
+  })
+
+  it("rejects Windows COM and LPT ports", () => {
+    assert.equal(isValidSkillName("COM1"), false)
+    assert.equal(isValidSkillName("COM9"), false)
+    assert.equal(isValidSkillName("LPT1"), false)
+    assert.equal(isValidSkillName("LPT9"), false)
+  })
+
+  it("rejects Windows reserved names case-insensitively", () => {
+    assert.equal(isValidSkillName("con"), false)
+    assert.equal(isValidSkillName("Con"), false)
+    assert.equal(isValidSkillName("cOn"), false)
+    assert.equal(isValidSkillName("com5"), false)
+  })
+
+  it("does not match reserved name as substring", () => {
+    assert.equal(isValidSkillName("CONTAINS"), true, "substring match should not block valid names")
+    assert.equal(isValidSkillName("auxiliary"), true, "prefix match should not block valid names")
+  })
 })
 
 // ── stem ──────────────────────────────────────────────────

@@ -283,8 +283,8 @@ function scoreSingleSkill(skill: SkillEntry, ctx: ScoringContext): ScoredSkill {
   const bigramResult = applyBigramBonus(ctx, descLower, nameTokenized)
   const phraseResult = applyPhraseBonus(ctx, descLower, nameLower, nameTokenized)
 
-  const score = nameResult.score + descResult.score + bigramResult.score + phraseResult.score +
-    (skill.scope === "project" && (nameResult.score + descResult.score + bigramResult.score + phraseResult.score) > 0 ? SCOPE_BONUS : 0)
+  const sum = nameResult.score + descResult.score + bigramResult.score + phraseResult.score
+  const score = sum + (skill.scope === "project" && sum > 0 ? SCOPE_BONUS : 0)
   const descScore = descResult.descScore + bigramResult.descScore + phraseResult.descScore
   const matched = [
     ...nameResult.matched,

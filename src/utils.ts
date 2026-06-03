@@ -105,11 +105,23 @@ export function extractFrontmatter(content: string, key: string): string | null 
 // ── Security ───────────────────────────────────────────────
 
 /**
+ * Windows reserved device names that cause issues with readdir, zip, and git.
+ * Blocked case-insensitively to prevent bypass via casing tricks.
+ */
+const WINDOWS_RESERVED = new Set([
+  "con", "prn", "aux", "nul",
+  "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+  "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+])
+
+/**
  * Validates that a directory name is safe to use as a skill identifier.
  *
  * Rejects names that could be used for path traversal attacks:
  *   - `..` and `.` — relative path navigation
  *   - `/` and `\` — path separators that could escape the skills directory
+ *   - Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+ *     — break readdir, zip, git on Windows
  *
  * This is a defense-in-depth check. The discovery code also resolves
  * symlinks and checks for symbolic links, but this provides an additional
@@ -119,7 +131,10 @@ export function extractFrontmatter(content: string, key: string): string | null 
  * @returns true if the name is safe to use, false if it should be skipped
  */
 export function isValidSkillName(name: string): boolean {
-  return name !== ".." && name !== "." && !name.includes("/") && !name.includes("\\") && !name.includes("\0")
+  if (name === ".." || name === ".") return false
+  if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false
+  if (WINDOWS_RESERVED.has(name.toLowerCase())) return false
+  return true
 }
 
 /**

@@ -27,7 +27,7 @@ export async function searchRemoteSkills(query: string): Promise<string> {
     clearTimeout(timer)
     if (!res.ok) return ""
     const contentType = res.headers.get("content-type") ?? ""
-    if (!contentType.includes("application/json")) return ""
+    if (!/^application\/json\b/.test(contentType)) return ""
     const body = await res.json() as Record<string, unknown>
     if (!body || typeof body !== "object" || !Array.isArray(body.data)) return ""
     const data = body.data as Array<Record<string, unknown>>

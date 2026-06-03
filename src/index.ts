@@ -40,7 +40,25 @@ const { semverGt } = require("../bin/shared.cjs") as { semverGt: (a: string, b: 
 
 const TOAST_VARIANTS = ["info", "success", "error", "warning"] as const
 
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+let _lastUpdateCheck = 0
+let _lastUpdateResult: string | null = null
+
 async function checkForUpdate(tui: any): Promise<void> {
+  const now = Date.now()
+  if (now - _lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) {
+    if (_lastUpdateResult) {
+      await tui.showToast({
+        body: {
+          message: `Update available: ${CURRENT_VERSION} → ${_lastUpdateResult} — npm install -g opencode-triage@latest`,
+          variant: "warning",
+        },
+      })
+    }
+    return
+  }
+  _lastUpdateCheck = now
+  _lastUpdateResult = null
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 3000)
@@ -52,6 +70,7 @@ async function checkForUpdate(tui: any): Promise<void> {
     const pkg = await res.json() as { version?: string }
     const latest = pkg.version
     if (latest && semverGt(latest, CURRENT_VERSION)) {
+      _lastUpdateResult = latest
       await tui.showToast({
         body: {
           message: `Update available: ${CURRENT_VERSION} → ${latest} — npm install -g opencode-triage@latest`,
@@ -441,19 +460,23 @@ export const server: Plugin = async ({ worktree, client }, options) => {
         "This tool is disabled. Use `triage` to discover and load specialized skills."
       if (!wasHookFired) await remigrateIfHooksDetected()
     },
-    // ── System prompt cleanup ─────────────────────────────
+    // ── System prompt cleanup + triage directive injection ────────
     // Strips the <available_skills> XML block from the system prompt
     // as a belt-and-suspenders measure alongside tool.definition.
     // Falls back silently if the experimental hook is not available.
     // Also handles mid-session state changes: if triage toggled ON
     // after startup, restore .disabled files here.
+    // Injects a directive that mandates calling the `triage` tool first,
+    // so the LLM has an explicit, hard-to-ignore instruction instead of
+    // relying on the tool description alone.
     "experimental.chat.system.transform": async (_input, output) => {
       const state = await getTriageState()
       if (state !== "on") return
       if (!migrationCompleted) await remigrateIfHooksDetected()
       const re = /<available_skills>[\s\S]*?<\/available_skills>/g
+      const directive = "\n\nBefore any task, call the `triage` tool to discover specialized skills. Pass a brief query. Load the matched skill's content and follow its instructions.\n"
       for (let i = 0; i < output.system.length; i++) {
-        output.system[i] = output.system[i].replace(re, "")
+        output.system[i] = output.system[i].replace(re, "").trimEnd() + directive
       }
     },
     // ── Skill call interception ───────────────────────────
@@ -484,11 +507,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           const bodyIndex = result.indexOf("\n\n")
           if (bodyIndex !== -1) {
             const body = result.slice(bodyIndex + 2).trimStart()
-            if (body.startsWith("(skill content truncated")) {
+            if (body.startsWith("__TRIAGE_TRUNCATED__")) {
               await client.tui.showToast({
                 body: { message: `Skill "${skillName}" exceeds 1MB limit — truncated`, variant: "warning" },
               })
-            } else if (body.startsWith("(skill content unavailable")) {
+            } else if (body.startsWith("__TRIAGE_UNAVAILABLE__")) {
               await client.tui.showToast({
                 body: { message: `Could not read skill file for "${skillName}"`, variant: "error" },
               })

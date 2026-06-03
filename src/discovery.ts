@@ -144,7 +144,7 @@ export async function readSkillContent(filePath: string): Promise<string> {
   try {
     const buf = await readFile(filePath)
     if (buf.byteLength > MAX_SKILL_SIZE) {
-      return `(skill content truncated: exceeds 1MB limit)`
+      return `__TRIAGE_TRUNCATED__: exceeds 1MB limit`
     }
     const content = buf.toString("utf-8")
     const clean = stripBOM(content)
@@ -155,7 +155,7 @@ export async function readSkillContent(filePath: string): Promise<string> {
     const body = fmEnd !== -1 ? clean.slice(fmEnd + 4).trimStart() : clean.trim()
     return sanitizeSkillContent(body)
   } catch {
-    return "(skill content unavailable)"
+    return "__TRIAGE_UNAVAILABLE__: could not read skill file"
   }
 }
 
