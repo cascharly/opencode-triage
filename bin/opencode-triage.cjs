@@ -4,7 +4,7 @@
  * ==================
  * Manage the opencode-triage skill router plugin.
  *
- * Usage: /triage on | off | status | compare | version | help
+ * Usage: /triage on | off | status | compare | download-model | version | help
  *
  * Quickstart:
  *   /triage on    Hide all skills from the AI prompt (global + local)
@@ -172,7 +172,7 @@ function levenshtein(a, b) {
 }
 
 function suggestCommand(input) {
-  const commands = ["on", "off", "enable", "disable", "mode", "status", "dedupe", "compare", "version", "help"]
+  const commands = ["on", "off", "enable", "disable", "mode", "status", "dedupe", "compare", "download-model", "version", "help"]
   let best = null, bestDist = Infinity
   for (const cmd of commands) {
     const d = levenshtein(input, cmd)
@@ -207,6 +207,8 @@ function main() {
       return setMode(modeArg || "auto", toggleScope)
     case "compare":
       return showCompare()
+    case "download-model":
+      return downloadModel()
     case "version":
     case "--version":
     case "-v":
@@ -1079,18 +1081,84 @@ function checkForUpdate() {
   }).on("error", () => {})
 }
 
+// ── download-model ─────────────────────────────────────────
+
+async function downloadModel() {
+  const MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+  if (!isQuiet) console.log(`Downloading embedding model: ${MODEL}`)
+  if (!isQuiet) console.log("This may take 30-60s on first run (~118MB). Subsequent starts are instant.\n")
+
+  // Stub broken sharp (native binary download blocked by corporate proxy)
+  // transformers.js uses import('sharp') which throws unhandled if the package
+  // is missing entirely; a stub avoids the import-time crash.
+  const sharpDir = path.join(__dirname, "..", "node_modules", "sharp")
+  const sharpIndex = path.join(sharpDir, "index.js")
+  const sharpPkg = path.join(sharpDir, "package.json")
+  const sharpLib = path.join(sharpDir, "lib")
+  const sharpLibConstructor = path.join(sharpLib, "constructor.js")
+  if (fs.existsSync(sharpDir) && !fs.existsSync(sharpLibConstructor)) {
+    // sharp already installed but native binary failed — replace with stub
+  }
+  try { fs.mkdirSync(sharpLib, { recursive: true }) } catch {}
+  try { fs.writeFileSync(sharpPkg, JSON.stringify({ name: "sharp", version: "0.0.0", main: "lib/constructor.js" })) } catch {}
+  try { fs.writeFileSync(sharpLibConstructor, "module.exports = function() { throw new Error('sharp: image processing unavailable') }") } catch {}
+  try { fs.writeFileSync(sharpIndex, "module.exports = require('./lib/constructor')") } catch {}
+
+  try {
+    const { pipeline } = require("@xenova/transformers")
+    if (!isQuiet) console.log("Loading model...")
+    const model = await pipeline("feature-extraction", MODEL)
+    if (!isQuiet) console.log("Warming up...")
+    const out = await model("test", { pooling: "mean", normalize: true })
+    if (!isQuiet) console.log(`OK — embedding dimension: ${out.data.length}`)
+    if (isJson) {
+      console.log(JSON.stringify({ status: "ok", model: MODEL, dims: out.data.length }))
+    } else {
+      console.log(`\nModel ready. Semantic cross-lingual matching is now available.`)
+    }
+  } catch (e) {
+    const msg = e.message ?? String(e)
+    if (isJson) {
+      console.log(JSON.stringify({ status: "error", error: msg, raw: e.stack ?? String(e) }))
+    } else {
+      console.error(`Failed to download model: ${msg}`)
+      console.error()
+      if (!isQuiet) {
+        console.error("Raw error:")
+        console.error(e.stack ?? String(e))
+        console.error()
+      }
+      console.error("Possible causes:")
+      console.error("  1. Network/proxy blocks HuggingFace CDN (cdn-lfs.hf.co)")
+      console.error("  2. Corporate firewall blocks .onnx file downloads")
+      console.error("  3. Missing dependencies — run: npm install @xenova/transformers onnxruntime-node")
+      console.error()
+      if (msg.includes("fetch failed")) {
+        console.error("Manual download workaround:")
+        console.error(`  1. On a different network, run: npx opencode-triage download-model`)
+        console.error(`     This caches the model to ~/.cache/huggingface/`)
+        console.error(`  2. Or manually download and place files in:`)
+        console.error(`     ~/.cache/huggingface/hub/models--Xenova--paraphrase-multilingual-MiniLM-L12-v2/`)
+        console.error()
+      }
+      console.error("Triage will fall back to keyword scoring without semantic matching.")
+    }
+    process.exit(1)
+  }
+}
+
 // ── help ──────────────────────────────────────────────────
 
 function showHelp() {
   if (isJson) {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
-      commands: ["on", "off", "status", "dedupe", "compare", "version", "help"],
+      commands: ["on", "off", "status", "dedupe", "compare", "download-model", "version", "help"],
       flags: ["--local", "--global", "--both", "--json", "--quiet", "--all"],
     }, null, 2))
     return
   }
-  const cmdCol = 10
+  const cmdCol = 16
   const flagCol = 12
   const cmd = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(cmdCol - name.length) + desc
   const flag = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(flagCol - name.length) + desc
@@ -1102,6 +1170,7 @@ function showHelp() {
   console.log(cmd("status", "Show current state, skill counts, and token savings"))
   console.log(cmd("dedupe", "Remove duplicate skills (interactive: choose local or global)"))
   console.log(cmd("compare", "Token/time cost comparison with vs without triage"))
+  console.log(cmd("download-model", "Pre-download the ~118MB semantic embedding model"))
   console.log(cmd("version", "Show version and check for updates"))
   console.log(cmd("help", "Show this help"))
   console.log()

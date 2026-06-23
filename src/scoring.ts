@@ -8,7 +8,7 @@
  *   1. Tokenize query: split on whitespace, strip punctuation, filter short words
  *   2. Compute IDF — words appearing in many descs get lower weight
  *   3. For each skill, score each query word against name (3x) and desc (1x)
- *      with IDF and position decay (earlier words matter more)
+ *      with IDF
  *   4. Desc scoring falls back to stemmed form — "vulnerability" matches
  *      "vulnerabilities", "refactor" matches "refactoring", etc.
  *   5. Bigram bonus — consecutive word pairs in desc OR tokenized name
@@ -19,17 +19,63 @@
  */
 
 import {
-  THRESHOLD,
-  MIN_WORD_LENGTH,
   NAME_WEIGHT,
   DESC_WEIGHT,
   BIGRAM_BONUS,
   PHRASE_BONUS,
-  POSITION_DECAY,
   SCOPE_BONUS,
 } from "./config.ts"
 import { escapeRegex } from "./utils.ts"
+import { cosineSimilarity } from "./embeddings.ts"
 import type { SkillEntry, ScoredSkill } from "./config.ts"
+import { createRequire } from "node:module"
+
+const require = createRequire(import.meta.url)
+
+const NON_ALPHANUM_RE = /[^\p{L}\p{N}]/gu
+
+let _jieba: { cut_for_search(text: string, hmm: boolean): string[] } | null = null
+
+function getJieba() {
+  if (!_jieba) {
+    _jieba = require("jieba-wasm")
+  }
+  return _jieba!
+}
+
+/**
+ * Tokenizes a query string into an array of searchable words.
+ *
+ * Uses jieba's cut_for_search for word segmentation, then strips
+ * non-alphanumeric chars and filters tokens shorter than 2 characters.
+ * Tokens are deduplicated while preserving order.
+ *
+ * Falls back to whitespace-based tokenization if jieba is unavailable.
+ *
+ * @param query - Already lowercased query string
+ * @returns Array of tokenized and filtered words
+ */
+function tokenizeQuery(query: string): string[] {
+  try {
+    const jieba = getJieba()
+    const tokens = jieba.cut_for_search(query, true)
+    const seen = new Set<string>()
+    const words: string[] = []
+    for (const t of tokens) {
+      const cleaned = t.replace(NON_ALPHANUM_RE, "")
+      if (!cleaned || cleaned.length < 2) continue
+      if (seen.has(cleaned)) continue
+      seen.add(cleaned)
+      words.push(cleaned)
+    }
+    return words
+  } catch {
+    return query
+      .split(/\s+/)
+      .map(w => w.replace(NON_ALPHANUM_RE, ""))
+      .filter(w => w.length >= 2)
+  }
+}
 
 /**
  * Applies lightweight suffix stripping to normalize word inflections.
@@ -80,11 +126,11 @@ export function getWordBonus(word: string, target: string): number {
  * Scores all skills against a user query using keyword matching.
  *
  * The scoring pipeline:
- *   1. Tokenize query: split on whitespace, strip punctuation, filter short words
+ *   1. Tokenize query: jieba cut_for_search for word segmentation, then strip
+ *      non-alphanumeric chars and filter tokens shorter than 2 characters.
  *   2. Compute IDF — words appearing in many descs get lower weight
  *   3. For each skill, score each query word against name (3x) and desc (1x)
- *      with IDF and position decay (earlier words matter more)
- *   3a. Desc scoring falls back to stemmed form — "vulnerability" matches
+ *      with IDF. Desc scoring falls back to stemmed form — "vulnerability" matches
  *       "vulnerabilities", "refactor" matches "refactoring", etc.
  *   4. Bigram bonus — consecutive word pairs in desc OR tokenized name get +BIGRAM_BONUS
  *      ("react native" hits "vercel-react-native-skills" via name tokenization)
@@ -100,12 +146,7 @@ export function getWordBonus(word: string, target: string): number {
  * @returns All skills with computed scores (filter for score > 0 to get matches)
  */
 export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] {
-  // Tokenize: lowercase → split on whitespace → strip non-alphanumeric chars → filter short words
-  // Unicode letter/number classes (\p{L}\p{N}) support international queries
-  const words = query.toLowerCase()
-    .split(/\s+/)
-    .map(w => w.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(w => w.length >= MIN_WORD_LENGTH)
+  const words = tokenizeQuery(query.toLowerCase())
 
   if (words.length === 0) return []
 
@@ -137,28 +178,26 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
     let descScore = 0
     const matched: string[] = []
 
-    // Score name matches first (higher weight, with IDF + position)
+    // Score name matches first (higher weight, with IDF)
     for (let i = 0; i < words.length; i++) {
       const word = words[i]
-      const positionWeight = Math.pow(POSITION_DECAY, i)
       const bonus = getWordBonus(word, nameLower)
       if (bonus > 0) {
-        score += NAME_WEIGHT * bonus * idf[word] * positionWeight
+        score += NAME_WEIGHT * bonus * idf[word]
         matched.push(`name:${word}`)
       }
     }
 
-    // Then score description matches (lower weight, with IDF + position).
+    // Then score description matches (lower weight, with IDF).
     // Falls back to stemmed desc so "vulnerability" matches "vulnerabilities",
     // "refactor" matches "refactoring", etc. Takes the higher of the two bonuses.
     for (let i = 0; i < words.length; i++) {
       const word = words[i]
-      const positionWeight = Math.pow(POSITION_DECAY, i)
       const bonus = getWordBonus(word, descLower)
       const stemBonus = getWordBonus(stem(word), stemmedDescLower)
       const effectiveBonus = Math.max(bonus, stemBonus)
       if (effectiveBonus > 0) {
-        const points = DESC_WEIGHT * effectiveBonus * idf[word] * positionWeight
+        const points = DESC_WEIGHT * effectiveBonus * idf[word]
         score += points
         descScore += points
         matched.push(stemBonus > bonus ? `desc:stem:${word}` : `desc:${word}`)
@@ -201,5 +240,42 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
     }
 
     return { ...skill, score, descScore, matchedBy: matched.join(", ") }
+  })
+}
+
+/**
+ * Scores all skills using semantic embedding similarity.
+ *
+ * Replaces keyword-based scoring with cosine similarity between the
+ * query embedding and each skill's embedding (computed from "name: desc").
+ * Only the scope bonus is retained — all other keyword signals (IDF, bigram,
+ * phrase, stemming) are captured by the multilingual embedding model.
+ *
+ * @param queryEmbedding - Pre-computed embedding of the user's query
+ * @param skills - Array of discovered skills
+ * @param skillEmbeddings - Map from skill path to pre-computed embedding
+ * @returns Scored skills sorted by relevance (caller should sort by score desc)
+ */
+export function scoreSkillsSemantic(
+  queryEmbedding: number[],
+  skills: SkillEntry[],
+  skillEmbeddings: Map<string, number[]>
+): ScoredSkill[] {
+  return skills.map(skill => {
+    const emb = skillEmbeddings.get(skill.path)
+    if (!emb) return { ...skill, score: 0, descScore: 0, matchedBy: "" }
+
+    let score = cosineSimilarity(queryEmbedding, emb) * 100
+
+    if (skill.scope === "project" && score > 0) {
+      score += SCOPE_BONUS
+    }
+
+    return {
+      ...skill,
+      score: Math.round(score),
+      descScore: Math.round(score),
+      matchedBy: `semantic:${Math.round(score)}`,
+    }
   })
 }

@@ -6,3 +6,4 @@ dist/
 .claude/
 tsconfig.json
 skills-lock.json
+.codegraph/

@@ -4,7 +4,8 @@
  *
  * Run: node --experimental-strip-types scripts/simulate.ts
  */
-import { scoreSkills, THRESHOLD, NAME_WEIGHT, DESC_WEIGHT, BIGRAM_BONUS, PHRASE_BONUS, POSITION_DECAY, getWordBonus, type SkillEntry, type ScoredSkill } from "../src/utils.ts"
+import { scoreSkills, getWordBonus } from "../src/scoring.ts"
+import { THRESHOLD, NAME_WEIGHT, DESC_WEIGHT, BIGRAM_BONUS, PHRASE_BONUS, type SkillEntry, type ScoredSkill } from "../src/config.ts"
 import { homedir } from "node:os"
 import { join, basename } from "node:path"
 import { readdir, readFile, realpath } from "node:fs/promises"
