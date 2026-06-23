@@ -26,8 +26,8 @@ import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { THRESHOLD, checkTriageState } from "./config.ts"
-import type { SkillEntry } from "./config.ts"
+import { THRESHOLD, checkTriageState, resolveAmbientConfig } from "./config.ts"
+import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
 const CURRENT_VERSION: string = (() => {
@@ -150,6 +150,50 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     return triageStateCache.state
   }
 
+  // Ambient suggestion config, cached with the same TTL so config/env edits
+  // are picked up without restart-on-every-call overhead.
+  let ambientConfigCache: { cfg: AmbientConfig; ts: number } | null = null
+  function getAmbientConfig(): AmbientConfig {
+    const now = Date.now()
+    if (ambientConfigCache === null || now - ambientConfigCache.ts > CACHE_TTL_MS) {
+      ambientConfigCache = { cfg: resolveAmbientConfig(worktree, options), ts: now }
+    }
+    return ambientConfigCache.cfg
+  }
+
+  /**
+   * Builds the ambient candidate block for a query, or null if nothing qualifies.
+   *
+   * Scores all discovered skills, keeps those at/above the configured floor,
+   * takes the top-K, and renders a compact name+desc list that tells the model
+   * to call triage() to load the full instructions. Only name+desc is injected
+   * (never full content) to keep per-turn token cost minimal.
+   */
+  async function buildSuggestionBlock(query: string, skipNames?: Set<string>): Promise<{ block: string; names: string[] } | null> {
+    const cfg = getAmbientConfig()
+    const skills = await getCachedSkills()
+    if (skills.length === 0) return null
+    const allScored = scoreSkills(query, skills)
+    const scored = allScored
+      .filter(s => s.score >= cfg.ambientMinScore && !skipNames?.has(s.name))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, cfg.ambientMaxCandidates)
+    if (scored.length === 0) return null
+    const names = scored.map(s => s.name)
+    const block = [
+      "<suggested_skills>",
+      "The following installed skills may be relevant to the current message.",
+      'If one fits, call triage({ query: "<skill name>" }) to load its full instructions, then follow them.',
+      "If none are relevant, ignore this block.",
+      ...scored.map(s => {
+        const desc = s.desc.length > 80 ? s.desc.slice(0, 77) + "..." : s.desc
+        return `- ${s.name}: ${desc}`
+      }),
+      "</suggested_skills>",
+    ].join("\n")
+    return { block, names }
+  }
+
   // Exclude the triage skill itself — self-referencing would create infinite loops
   // Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
   // Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
@@ -207,6 +251,14 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     }
     checkForUpdate(client.tui)
   })()
+
+  // Context accumulation for ambient scoring. _contextText accumulates all
+  // message text within a single user turn (reset on each user message).
+  // _suggested tracks skill names already injected this turn for dedup.
+  // _firstInsert controls inject position: prepend on first, append on later.
+  let _contextText = ""
+  let _suggested = new Set<string>()
+  let _firstInsert = false
 
   return {
     tool: {
@@ -385,12 +437,50 @@ export const server: Plugin = async ({ worktree, client }, options) => {
         "This tool is disabled. Use `triage` to discover and load specialized skills."
       if (!wasHookFired) await remigrateIfHooksDetected()
     },
+    "chat.message": async (input, output) => {
+      const cfg = getAmbientConfig()
+      if (!cfg.autoSuggest) return
+      const isUser = input.info?.type === "user" || input.info?.role === "user"
+      if (isUser) { _contextText = ""; _suggested = new Set(); _firstInsert = false }
+      const text = (output.parts ?? [])
+        .filter((p: any) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
+        .map((p: any) => p.text as string)
+        .join(" ")
+        .trim()
+      if (text) _contextText += (_contextText ? " " : "") + text
+    },
+    // ── Ephemeral suggestion injection ──────────────────────
+    // experimental.chat.messages.transform fires on every LLM request step.
+    // Injected parts are visible to the LLM for this turn only — output.messages
+    // is re-fetched from DB each iteration, so mutations never persist.
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const cfg = getAmbientConfig()
+      if (!cfg.autoSuggest || !_contextText) return
+      let result = await buildSuggestionBlock(_contextText, _suggested)
+      // Stale _suggested from a previous session (same process) can block all
+      // candidates because buildSuggestionBlock filters out every name it contains.
+      // When that happens, clear the stale dedup set and retry once.
+      if (!result && _suggested.size > 0) {
+        _suggested = new Set()
+        result = await buildSuggestionBlock(_contextText, _suggested)
+      }
+      if (!result) return
+      for (const n of result.names) _suggested.add(n)
+      const msgs = output.messages ?? []
+      const part = { type: "text", text: result.block, synthetic: true } as any
+      if (!_firstInsert) {
+        _firstInsert = true
+        const lastUser = [...msgs].reverse().find((m: any) => m.info?.type === "user" || m.info?.role === "user")
+        if (lastUser) {
+          lastUser.parts.unshift(part)
+          return
+        }
+      }
+      msgs.push({ info: { type: "user", role: "user" }, parts: [part] } as any)
+    },
     // ── System prompt cleanup ─────────────────────────────
     // Strips the <available_skills> XML block from the system prompt
     // as a belt-and-suspenders measure alongside tool.definition.
-    // Falls back silently if the experimental hook is not available.
-    // Also handles mid-session state changes: if triage toggled ON
-    // after startup, restore .disabled files here.
     "experimental.chat.system.transform": async (_input, output) => {
       const state = await getTriageState()
       if (state !== "on") return

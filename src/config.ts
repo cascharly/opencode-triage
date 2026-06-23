@@ -30,7 +30,7 @@ export const THRESHOLD = 30
  * Filters out common short words like "a", "an", "to", "do" that
  * would create false positive matches across many skills.
  */
-export const MIN_WORD_LENGTH = 3
+export const MIN_WORD_LENGTH = 2
 
 /**
  * Multiplier applied to score bonuses from skill name matches.
@@ -72,13 +72,6 @@ export const BIGRAM_BONUS = 10
 export const PHRASE_BONUS = 50
 
 /**
- * Position weight decay: earlier words in the query matter more.
- * First word gets full weight (×1.0), each subsequent word gets
- * multiplied by this factor. Compounds with word bonus.
- */
-export const POSITION_DECAY = 0.9
-
-/**
  * Bonus points added to project-scoped skills that scored > 0.
  * Project skills are more relevant to current work than global ones.
  * Acts as a tiebreaker when a project and global skill have equal scores.
@@ -86,6 +79,33 @@ export const POSITION_DECAY = 0.9
  * clearly better global match.
  */
 export const SCOPE_BONUS = 5
+
+// ── Ambient suggestion constants ───────────────────────────
+
+/**
+ * Default minimum absolute score a skill must reach to be auto-injected
+ * as a candidate into the system prompt for the current message.
+ *
+ * Different from THRESHOLD (which is a top-vs-runner-up GAP for single-skill
+ * auto-routing). This is an absolute FLOOR: too low surfaces noise on
+ * unrelated messages, too high never surfaces relevant skills.
+ *
+ * Reference (see scoring.ts): one exact name word ≈ 45+, one exact desc
+ * word ≈ 15–30. ~20 means "needs at least one decent hit to surface".
+ *
+ * Overridable via plugin options (`ambientMinScore`) or env
+ * (`OPENCODE_TRIAGE_MIN_SCORE`).
+ */
+export const AMBIENT_MIN_SCORE = 30
+
+/**
+ * Default maximum number of candidate skills injected per message (top-K).
+ * Higher = better recall but more tokens per turn and more mis-trigger risk.
+ *
+ * Overridable via plugin options (`ambientMaxCandidates`) or env
+ * (`OPENCODE_TRIAGE_MAX_CANDIDATES`).
+ */
+export const AMBIENT_MAX_CANDIDATES = 3
 
 // ── Type definitions ───────────────────────────────────────
 
@@ -115,6 +135,19 @@ export interface ScoredSkill extends SkillEntry {
   descScore: number
   /** Human-readable list of which words matched and where (e.g. "name:backup, desc:database") */
   matchedBy: string
+}
+
+/**
+ * Resolved configuration for the ambient (per-message) skill suggestion feature.
+ * Produced by resolveAmbientConfig() from plugin options, config files, env, and defaults.
+ */
+export interface AmbientConfig {
+  /** Whether to auto-inject candidate skills into the system prompt per message */
+  autoSuggest: boolean
+  /** Absolute score floor a skill must reach to be injected as a candidate */
+  ambientMinScore: number
+  /** Maximum number of candidates injected per message */
+  ambientMaxCandidates: number
 }
 
 // ── Triage state ───────────────────────────────────────────
@@ -178,6 +211,41 @@ export function getTriageStateFromPath(path: string): "on" | "off" | "unknown" {
 }
 
 /**
+ * Returns the config file paths checked for the opencode-triage plugin entry,
+ * in priority order: local project config first, then global config.
+ *
+ * @param worktree - Git worktree root or current working directory
+ * @returns Ordered list of candidate config file paths
+ */
+export function configPaths(worktree: string): string[] {
+  return [
+    join(worktree, ".opencode", "opencode.json"),
+    join(worktree, ".opencode", "opencode.jsonc"),
+    join(homedir(), ".config", "opencode", "opencode.json"),
+    join(homedir(), ".config", "opencode", "opencode.jsonc"),
+  ]
+}
+
+/**
+ * Reads the opencode-triage plugin options object from a single config file.
+ *
+ * @param path - Absolute path to config file
+ * @returns The plugin options object, or null if the entry/file is missing
+ */
+export function getTriageOptionsFromPath(path: string): Record<string, unknown> | null {
+  try {
+    const raw = readFileSync(path, "utf-8")
+    const json = JSON.parse(stripJsoncComments(raw))
+    const plugin: unknown[] = json.plugin ?? []
+    for (const p of plugin) {
+      if (!Array.isArray(p) || p[0] !== "opencode-triage") continue
+      return (p[1] as Record<string, unknown>) ?? {}
+    }
+    return null
+  } catch { return null }
+}
+
+/**
  * Resolves the effective triage state from plugin options + config files.
  *
  * Priority: plugin options → local config → global config.
@@ -193,15 +261,106 @@ export async function checkTriageState(
 ): Promise<"on" | "off" | "unknown"> {
   if (options?.autoHide === true)  return "on"
   if (options?.autoHide === false) return "off"
-  const paths = [
-    join(worktree, ".opencode", "opencode.json"),
-    join(worktree, ".opencode", "opencode.jsonc"),
-    join(homedir(), ".config", "opencode", "opencode.json"),
-    join(homedir(), ".config", "opencode", "opencode.jsonc"),
-  ]
-  for (const p of paths) {
+  for (const p of configPaths(worktree)) {
     const state = getTriageStateFromPath(p)
     if (state !== "unknown") return state
   }
-  return "unknown"
+  return "on"
+}
+
+// ── Ambient config resolution ──────────────────────────────
+
+/**
+ * Coerces a value to boolean. Accepts native booleans, numbers (0/non-0),
+ * and common string forms (true/false/1/0/yes/no/on/off, case-insensitive).
+ *
+ * @returns The boolean, or undefined if the value is absent/unrecognized
+ */
+function coerceBool(v: unknown): boolean | undefined {
+  if (typeof v === "boolean") return v
+  if (typeof v === "number") return v !== 0
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase()
+    if (["true", "1", "yes", "on"].includes(s)) return true
+    if (["false", "0", "no", "off"].includes(s)) return false
+  }
+  return undefined
+}
+
+/**
+ * Coerces a value to a finite number with optional clamping/rounding.
+ * Out-of-range values are clamped (not rejected) so a sane number is always used.
+ *
+ * @returns The number, or undefined if the value is absent/non-numeric
+ */
+function coerceNum(v: unknown, opts: { min?: number; max?: number; int?: boolean }): number | undefined {
+  let n: number
+  if (typeof v === "number") n = v
+  else if (typeof v === "string" && v.trim() !== "") n = Number(v)
+  else return undefined
+  if (!Number.isFinite(n)) return undefined
+  if (opts.int) n = Math.round(n)
+  if (opts.min !== undefined && n < opts.min) n = opts.min
+  if (opts.max !== undefined && n > opts.max) n = opts.max
+  return n
+}
+
+/** Returns the first source that coerces to a boolean, else the fallback. */
+function pickBool(sources: unknown[], fallback: boolean): boolean {
+  for (const s of sources) {
+    const b = coerceBool(s)
+    if (b !== undefined) return b
+  }
+  return fallback
+}
+
+/** Returns the first source that coerces to a number, else the fallback. */
+function pickNum(sources: unknown[], fallback: number, opts: { min?: number; max?: number; int?: boolean }): number {
+  for (const s of sources) {
+    const n = coerceNum(s, opts)
+    if (n !== undefined) return n
+  }
+  return fallback
+}
+
+/**
+ * Resolves the ambient suggestion configuration.
+ *
+ * Precedence (first defined wins, per key):
+ *   inline plugin options → config file entry → environment variable → default
+ *
+ * All values are validated/clamped; malformed input falls back to the default.
+ *
+ * Env vars: OPENCODE_TRIAGE_AUTO_SUGGEST, OPENCODE_TRIAGE_MIN_SCORE,
+ *           OPENCODE_TRIAGE_MAX_CANDIDATES
+ *
+ * @param worktree - Git worktree root or current working directory
+ * @param options - Plugin options passed from OpenCode runtime
+ * @returns The resolved, validated ambient config
+ */
+export function resolveAmbientConfig(
+  worktree: string,
+  options: Record<string, unknown> | undefined
+): AmbientConfig {
+  let fileOpts: Record<string, unknown> | null = null
+  for (const p of configPaths(worktree)) {
+    const o = getTriageOptionsFromPath(p)
+    if (o !== null) { fileOpts = o; break }
+  }
+  return {
+    autoSuggest: pickBool(
+      [options?.autoSuggest, fileOpts?.autoSuggest, process.env.OPENCODE_TRIAGE_AUTO_SUGGEST],
+      true
+    ),
+    ambientMinScore: pickNum(
+      [options?.ambientMinScore, fileOpts?.ambientMinScore, process.env.OPENCODE_TRIAGE_MIN_SCORE],
+      AMBIENT_MIN_SCORE,
+      { min: 0 }
+    ),
+    ambientMaxCandidates: pickNum(
+      [options?.ambientMaxCandidates, fileOpts?.ambientMaxCandidates, process.env.OPENCODE_TRIAGE_MAX_CANDIDATES],
+      AMBIENT_MAX_CANDIDATES,
+      { min: 1, int: true }
+    ),
+  }
 }
