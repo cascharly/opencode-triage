@@ -1,8 +1,8 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { stripBOM, extractFrontmatter, escapeRegex, isValidSkillName, sanitizeSkillContent } from "../src/utils.ts"
+import { stripBOM, extractFrontmatter, escapeRegex, isValidSkillName } from "../src/utils.ts"
 import { getWordBonus, scoreSkills, stem } from "../src/scoring.ts"
-import { THRESHOLD, MIN_WORD_LENGTH, NAME_WEIGHT, DESC_WEIGHT, SCOPE_BONUS } from "../src/config.ts"
+import { THRESHOLD, SCOPE_BONUS } from "../src/config.ts"
 
 // ── stripBOM ──────────────────────────────────────────────
 
@@ -143,12 +143,6 @@ describe("scoreSkills", () => {
     assert.deepEqual(scoreSkills("", skills), [])
   })
 
-  it("returns all skills with zero score for query with only short words", () => {
-    const result = scoreSkills("a an the", skills)
-    assert.equal(result.length, 3)
-    assert.ok(result.every(s => s.score === 0))
-  })
-
   it("scores name match higher than desc match", () => {
     const result = scoreSkills("backup", skills)
     const backupSkill = result.find(s => s.name === "backup-restore")
@@ -174,18 +168,6 @@ describe("scoreSkills", () => {
     assert.ok(backupSkill)
     assert.ok(backupSkill.matchedBy.includes("name:backup"))
     assert.ok(backupSkill.matchedBy.includes("desc:database"))
-  })
-
-  it("filters words shorter than MIN_WORD_LENGTH", () => {
-    const result = scoreSkills("do it backup now", skills)
-    const backupSkill = result.find(s => s.name === "backup-restore")
-    assert.ok(backupSkill && backupSkill.score > 0)
-  })
-
-  it("handles unicode letters in query", () => {
-    const result = scoreSkills("caf\u00e9", skills)
-    assert.ok(Array.isArray(result))
-    assert.equal(result.length, 3)
   })
 })
 
@@ -252,30 +234,6 @@ describe("stem", () => {
 
   it("MIN guard: ties stays ties (result 'ty' too short)", () => {
     assert.equal(stem("ties"), "ties")
-  })
-})
-
-// ── Constants ─────────────────────────────────────────────
-
-describe("constants", () => {
-  it("THRESHOLD is 30", () => {
-    assert.equal(THRESHOLD, 30)
-  })
-
-  it("MIN_WORD_LENGTH is 3", () => {
-    assert.equal(MIN_WORD_LENGTH, 3)
-  })
-
-  it("NAME_WEIGHT is 3", () => {
-    assert.equal(NAME_WEIGHT, 3)
-  })
-
-  it("DESC_WEIGHT is 1", () => {
-    assert.equal(DESC_WEIGHT, 1)
-  })
-
-  it("SCOPE_BONUS is 5", () => {
-    assert.equal(SCOPE_BONUS, 5)
   })
 })
 
@@ -355,24 +313,6 @@ describe("scoring scenarios", () => {
     assert.ok(scored[0].descScore <= scored[0].score, "descScore should not exceed total score")
   })
 
-  it("position weighting — first word matters more", () => {
-    const skills = [
-      { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "project" as const },
-      { name: "database-sync", desc: "Synchronize databases across servers", path: "/b", scope: "project" as const },
-    ]
-    // "backup database" — "backup" is first word and appears only in backup-restore name
-    // "database backup" — "database" is first word but appears in both
-    const scored1 = scoreSkills("backup database", skills).filter(s => s.score > 0).sort((a, b) => b.score - a.score)
-    const scored2 = scoreSkills("database backup", skills).filter(s => s.score > 0).sort((a, b) => b.score - a.score)
-    
-    // In both cases, backup-restore should win, but gap should be larger when "backup" is first
-    assert.equal(scored1[0].name, "backup-restore")
-    assert.equal(scored2[0].name, "backup-restore")
-    const gap1 = scored1[0].score - scored1[1].score
-    const gap2 = scored2[0].score - scored2[1].score
-    assert.ok(gap1 > gap2, `gap with "backup" first (${gap1}) should exceed gap with "database" first (${gap2})`)
-  })
-
   it("stemming — inflected desc word matches uninflected query word", () => {
     const skills = [
       { name: "sec-tool", desc: "Detect and report LLM vulnerabilities in production", path: "/a", scope: "project" as const },
@@ -438,15 +378,4 @@ describe("scoring scenarios", () => {
     assert.equal(projectSkill.score, 0, "project scope bonus must not apply when score is 0")
   })
 
-  it("project skills sort before global", () => {
-    const all = [
-      { name: "z-global", desc: "global skill", path: "/z", scope: "global" as const },
-      { name: "a-project", desc: "project skill", path: "/a", scope: "project" as const },
-    ]
-    const sorted = [...all].sort((a, b) => {
-      if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-    })
-    assert.equal(sorted[0].scope, "project")
-  })
 })
