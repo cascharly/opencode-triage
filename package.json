@@ -40,6 +40,9 @@
       "optional": false
     }
   },
+  "dependencies": {
+    "jieba-wasm": "^2.4.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/cascharly/opencode-triage"
