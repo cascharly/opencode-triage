@@ -58,6 +58,8 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 All commands also work in your terminal: `npx opencode-triage <command>`. No OpenCode session needed.
 
+For automation, call `npx opencode-triage <command> --json` directly and ensure any wrapper writes its own warnings to stderr, not stdout. A wrapper that prepends text to stdout will make otherwise-valid JSON unparseable.
+
 ### Configuration Combinations
 
 | State | Global | Project | How to configure |
@@ -202,6 +204,8 @@ When triage is ON, skills are hidden from the LLM using three layers of hooks �
 The CLI can still rename files (`SKILL.md` ↔ `SKILL.md.disabled`) as a fallback for older OpenCode versions without hook support, and to migrate users upgrading from the old file-rename mode. On startup, any remaining `.disabled` files are restored to `.md` since hooks handle hiding.
 
 The `/triage status` command shows skills grouped by scope with `[hidden]`/`[exposed]` badges, detecting state from both hook config and file extensions. It warns when the plugin is ACTIVE but some skills remain exposed (out-of-sync state).
+
+`/triage status --json` reports both file-level state (`fileHidden`, `fileExposed`) and prompt-level effective state (`promptHidden`, `promptExposed`, `hideMode`). On Windows, if both `~/.config/opencode/opencode.json*` and `%APPDATA%/opencode/opencode.json*` exist, status also reports whether each contains the plugin plus redacted config hashes and differing top-level sections.
 
 ### How Routing Works
 

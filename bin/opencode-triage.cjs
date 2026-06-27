@@ -22,6 +22,7 @@ const path = require("path")
 const os = require("os")
 const https = require("https")
 const readline = require("readline")
+const crypto = require("crypto")
 
 const PLUGIN_NAME = "opencode-triage"
 const CMD = process.argv[2] || "help"
@@ -45,12 +46,33 @@ description: Toggle, inspect, and benchmark the triage skill router
 Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
 If output contains "Restart opencode", tell the user to restart.
 `
-const LOCAL_CFG_PATH  = path.join(WORKTREE, ".opencode", "opencode.json")
+const LOCAL_CFG_PATH = (() => {
+  const jsonPath = path.join(WORKTREE, ".opencode", "opencode.json")
+  const jsoncPath = path.join(WORKTREE, ".opencode", "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return jsonPath
+})()
 const LOCAL_CMD_DIR   = path.join(WORKTREE, ".opencode", "commands")
 const LOCAL_CMD_FILE  = path.join(LOCAL_CMD_DIR, "triage.md")
-const GLOBAL_CFG_PATH = path.join(HOMEDIR, ".config", "opencode", "opencode.jsonc")
+const GLOBAL_CFG_PATH = (() => {
+  const jsonPath = path.join(HOMEDIR, ".config", "opencode", "opencode.json")
+  const jsoncPath = path.join(HOMEDIR, ".config", "opencode", "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return jsoncPath
+})()
 const GLOBAL_CMD_DIR  = path.join(HOMEDIR, ".config", "opencode", "commands")
 const GLOBAL_CMD_FILE = path.join(GLOBAL_CMD_DIR, "triage.md")
+const WINDOWS_APPDATA_CFG_PATH = (() => {
+  if (process.platform !== "win32" || !process.env.APPDATA) return null
+  const dir = path.join(process.env.APPDATA, "opencode")
+  const jsonPath = path.join(dir, "opencode.json")
+  const jsoncPath = path.join(dir, "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return null
+})()
 
 const SKILL_DIRS = [
   { base: path.join(WORKTREE, ".agent", "skills"), label: ".agent/", scope: "project" },
@@ -309,6 +331,72 @@ function collectConfigState() {
   return { localActive: local.active, globalActive: global.active, localMode: local.mode, globalMode: global.mode }
 }
 
+function readConfigForDiagnostics(configPath) {
+  let raw
+  try {
+    raw = fs.readFileSync(configPath, "utf-8")
+  } catch {
+    return {
+      path: configPath,
+      exists: fs.existsSync(configPath),
+      error: "read_error",
+      pluginPresent: false,
+      sectionKeys: [],
+      sectionHashes: {},
+      hash: null,
+    }
+  }
+
+  try {
+    const config = JSON.parse(stripJsoncComments(raw))
+    const normalized = JSON.stringify(config)
+    return {
+      path: configPath,
+      exists: true,
+      error: null,
+      pluginPresent: Array.isArray(config.plugin) && config.plugin.some(isTriageEntry),
+      sectionKeys: Object.keys(config).sort(),
+      sectionHashes: Object.fromEntries(
+        Object.keys(config).sort().map(key => [
+          key,
+          crypto.createHash("sha256").update(JSON.stringify(config[key])).digest("hex").slice(0, 12),
+        ])
+      ),
+      hash: crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 12),
+    }
+  } catch {
+    return {
+      path: configPath,
+      exists: true,
+      error: "parse_error",
+      pluginPresent: false,
+      sectionKeys: [],
+      sectionHashes: {},
+      hash: null,
+    }
+  }
+}
+
+function collectWindowsConfigDiagnostics() {
+  if (process.platform !== "win32" || !WINDOWS_APPDATA_CFG_PATH) return null
+  const userConfig = readConfigForDiagnostics(GLOBAL_CFG_PATH)
+  const appDataConfig = readConfigForDiagnostics(WINDOWS_APPDATA_CFG_PATH)
+  const samePath = path.resolve(userConfig.path).toLowerCase() === path.resolve(appDataConfig.path).toLowerCase()
+  if (!userConfig.exists || !appDataConfig.exists || samePath) return null
+
+  const sections = new Set([...userConfig.sectionKeys, ...appDataConfig.sectionKeys])
+  const differingSections = [...sections]
+    .filter(key => userConfig.sectionHashes[key] !== appDataConfig.sectionHashes[key])
+    .sort()
+
+  return {
+    userConfig,
+    appDataConfig,
+    sameHash: userConfig.hash !== null && userConfig.hash === appDataConfig.hash,
+    differingSections,
+  }
+}
+
 // ── File rename for skill files ───────────────────────────
 
 function renameSkillFiles(fromExt, toExt) {
@@ -515,6 +603,10 @@ function dedupeSkills() {
   const dupNames = findDuplicateNames(skills)
 
   if (dupNames.size === 0) {
+    if (isJson) {
+      console.log(JSON.stringify({ ok: true, dryRun: isDryRun, changed: false, duplicates: [] }, null, 2))
+      return
+    }
     console.log()
     console.log("No duplicate skills found. Nothing to deduplicate.")
     console.log()
@@ -528,6 +620,16 @@ function dedupeSkills() {
       if (!dupGroups[s.name]) dupGroups[s.name] = { project: null, global: null }
       dupGroups[s.name][s.scope] = s
     }
+  }
+
+  if (isJson) {
+    const duplicates = Object.entries(dupGroups).map(([name, group]) => ({
+      name,
+      project: group.project ? { dir: group.project.label, path: group.project.dirPath, state: group.project.state } : null,
+      global: group.global ? { dir: group.global.label, path: group.global.dirPath, state: group.global.state } : null,
+    }))
+    console.log(JSON.stringify({ ok: true, dryRun: isDryRun, changed: false, changesPending: duplicates.length > 0, duplicates }, null, 2))
+    return
   }
 
   if (isDryRun) {
@@ -678,6 +780,7 @@ function showStatus() {
   const totalHidden = projHidden + gloHidden
   const totalExposed = projExposed + gloExposed
   const hiddenTokens = calcHiddenSkillTokens()
+  const windowsConfig = collectWindowsConfigDiagnostics()
 
   // NET savings: native XML list (name+desc per skill) minus triage tool def.
   // Skill body loading costs the same on both sides (on-demand), so it cancels out.
@@ -708,6 +811,40 @@ function showStatus() {
   const projState = effectiveState("project")
   const gloState = effectiveState("global")
 
+  function effectiveCounts(scope) {
+    const mode = scope === "project" ? localMode : globalMode
+    const skillsArr = scope === "project" ? projSkills : gloSkills
+    const fileHidden = skillsArr.filter(s => s.state === "hidden").length
+    const fileExposed = skillsArr.filter(s => s.state === "exposed").length
+    const hooksActive = mode === "auto"
+    const promptHidden = hooksActive ? fileHidden + fileExposed : fileHidden
+    const promptExposed = hooksActive ? 0 : fileExposed
+    const hasSkills = skillsArr.length > 0
+    return {
+      hooksActive,
+      fileHidden,
+      fileExposed,
+      promptHidden,
+      promptExposed,
+      effectiveHidden: promptHidden,
+      effectiveExposed: promptExposed,
+      hideMode: hasSkills && hooksActive ? "hooks" : hasSkills && fileHidden > 0 && fileExposed === 0 ? "file" : "none",
+    }
+  }
+
+  const projEffective = effectiveCounts("project")
+  const gloEffective = effectiveCounts("global")
+  const totalEffective = {
+    hooksActive: projEffective.hooksActive || gloEffective.hooksActive,
+    fileHidden: projEffective.fileHidden + gloEffective.fileHidden,
+    fileExposed: projEffective.fileExposed + gloEffective.fileExposed,
+    promptHidden: projEffective.promptHidden + gloEffective.promptHidden,
+    promptExposed: projEffective.promptExposed + gloEffective.promptExposed,
+    effectiveHidden: projEffective.effectiveHidden + gloEffective.effectiveHidden,
+    effectiveExposed: projEffective.effectiveExposed + gloEffective.effectiveExposed,
+    hideMode: projEffective.hooksActive || gloEffective.hooksActive ? "hooks" : totalHidden > 0 && totalExposed === 0 ? "file" : "none",
+  }
+
   function stateColor(state) { return state === "on" ? GREEN : YELLOW }
   function stateText(state) {
     return state === "on" ? "ON" : state === "off" ? "OFF" : state === "mixed" ? "MIXED" : "—"
@@ -721,21 +858,21 @@ function showStatus() {
     const hidden = skillsArr.filter(s => s.state === "hidden").length
     const exposed = skillsArr.filter(s => s.state === "exposed").length
 
+    if (skillsArr.length === 0) return "file: none · prompt: none"
     if (mode === "auto") {
-      const parts = [GREEN + "hooks" + RESET]
-      if (hidden > 0) parts.push(`${hidden} file-hidden`)
-      if (exposed > 0) parts.push(GREEN + `${exposed} exposed (hooks)` + RESET)
+      const fileState = hidden > 0 && exposed > 0 ? `mixed (${hidden} hidden, ${exposed} exposed)` : hidden > 0 ? "hidden" : "exposed"
+      const parts = [`file: ${fileState}`, GREEN + "prompt: hidden by hooks" + RESET]
       return parts.join(" · ")
     }
     if (active && mode === "manual") {
-      const parts = [YELLOW + "hooks off (manual)" + RESET]
-      if (hidden > 0) parts.push(GREEN + `${hidden} file-hidden` + RESET)
-      if (exposed > 0) parts.push(`${exposed} exposed`)
+      const fileState = hidden > 0 && exposed > 0 ? `mixed (${hidden} hidden, ${exposed} exposed)` : hidden > 0 ? "hidden" : "exposed"
+      const promptState = exposed > 0 ? YELLOW + "prompt: exposed" + RESET : GREEN + "prompt: hidden by file rename" + RESET
+      const parts = [YELLOW + "hooks off (manual)" + RESET, `file: ${fileState}`, promptState]
       return parts.join(" · ")
     }
     // Not active in config
-    if (hidden > 0) return GREEN + `${hidden} file-hidden` + RESET + " (no hooks)"
-    return exposed + " exposed (no hooks)"
+    if (hidden > 0) return `file: hidden · ${GREEN}prompt: hidden by file rename${RESET} · no hooks`
+    return `file: exposed · ${YELLOW}prompt: exposed${RESET} · no hooks`
   }
 
   // Out-of-sync warnings
@@ -759,6 +896,7 @@ function showStatus() {
         hidden: projHidden,
         exposed: projExposed,
         total: projHidden + projExposed,
+        ...projEffective,
         command: fs.existsSync(LOCAL_CMD_FILE) ? "found" : "not found",
         config: { active: localActive, mode: localMode },
       },
@@ -767,10 +905,12 @@ function showStatus() {
         hidden: gloHidden,
         exposed: gloExposed,
         total: gloHidden + gloExposed,
+        ...gloEffective,
         command: fs.existsSync(GLOBAL_CMD_FILE) ? "found" : "not found",
         config: { active: globalActive, mode: globalMode },
       },
-      totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed },
+      totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed, ...totalEffective },
+      windows_config: windowsConfig,
       tokens_saved: netSavings > 0 ? netSavings : 0,
       out_of_sync: outOfSync.length > 0 ? outOfSync : null,
       skills: skills.map(s => ({ name: s.name, state: s.state, scope: s.scope, dir: s.label, duplicate: dupNames.has(s.name) })),
@@ -792,12 +932,12 @@ function showStatus() {
   const projLabel = projSkills.length > 0 ? stateColor(projState) + stateText(projState) + RESET : DIM + "—" + RESET
   const projDef = defenseDesc("project")
   const projCmd = fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
-  console.log(`  Project:  ${projLabel}  │  ${projHidden + projExposed} skills  │  ${projDef}  │  ${projCmd}`)
+  console.log(`  Project:  ${projLabel}  │  ${projHidden + projExposed} skills  │  ${projDef}  │  command: ${projCmd}`)
 
   const gloLabel = gloSkills.length > 0 ? stateColor(gloState) + stateText(gloState) + RESET : DIM + "—" + RESET
   const gloDef = defenseDesc("global")
   const gloCmd = fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
-  console.log(`  Global:   ${gloLabel}  │  ${gloHidden + gloExposed} skills  │  ${gloDef}  │  ${gloCmd}`)
+  console.log(`  Global:   ${gloLabel}  │  ${gloHidden + gloExposed} skills  │  ${gloDef}  │  command: ${gloCmd}`)
   console.log()
 
   // Warnings
@@ -807,6 +947,19 @@ function showStatus() {
   }
   if (hookNotes.length > 0) {
     console.log(`  ${DIM}ℹ ${hookNotes.join("\n  ℹ ")}${RESET}`)
+    console.log()
+  }
+
+  if (windowsConfig) {
+    const differText = windowsConfig.sameHash
+      ? "config files match"
+      : `config files differ${windowsConfig.differingSections.length > 0 ? ": " + windowsConfig.differingSections.join(", ") : ""}`
+    const userStatus = windowsConfig.userConfig.pluginPresent ? GREEN + "plugin present" + RESET : YELLOW + "plugin missing" + RESET
+    const appDataStatus = windowsConfig.appDataConfig.pluginPresent ? GREEN + "plugin present" + RESET : YELLOW + "plugin missing" + RESET
+    console.log(`  ${BOLD}Windows config check:${RESET}`)
+    console.log(`    ~/.config/opencode/${path.basename(windowsConfig.userConfig.path)}: ${userStatus} · sha256:${windowsConfig.userConfig.hash || "unreadable"}`)
+    console.log(`    %APPDATA%/opencode/${path.basename(windowsConfig.appDataConfig.path)}: ${appDataStatus} · sha256:${windowsConfig.appDataConfig.hash || "unreadable"}`)
+    console.log(`    ${differText}`)
     console.log()
   }
 
