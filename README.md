@@ -240,3 +240,7 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 ## License
 
 MIT
+
+### Search and load tools
+
+`triage` searches installed skills without loading their instructions. Use native `skill({ name })` to load a result, or `load-skill({ name })` for results marked file-hidden. `list-skills` lists the installed catalog on demand. The fallback loader supports legacy `SKILL.md.disabled` files.
