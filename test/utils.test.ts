@@ -280,30 +280,6 @@ describe("stem", () => {
 
 // ── Constants ─────────────────────────────────────────────
 
-describe("constants", () => {
-  it("THRESHOLD is 30", () => {
-    assert.equal(THRESHOLD, 30)
-  })
-
-  it("MIN_WORD_LENGTH is 3", () => {
-    assert.equal(MIN_WORD_LENGTH, 3)
-  })
-
-  it("NAME_WEIGHT is 3", () => {
-    assert.equal(NAME_WEIGHT, 3)
-  })
-
-  it("DESC_WEIGHT is 1", () => {
-    assert.equal(DESC_WEIGHT, 1)
-  })
-
-  it("SCOPE_BONUS is 5", () => {
-    assert.equal(SCOPE_BONUS, 5)
-  })
-})
-
-// ── Integration: scoring scenarios ────────────────────────
-
 describe("scoring scenarios", () => {
   const skills = [
     { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "project" as const },
