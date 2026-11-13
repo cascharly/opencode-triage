@@ -324,6 +324,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   })()
 
   return {
+    dispose: async () => {
+      for (const watcher of watchers) watcher.close()
+      watchers = []
+    },
     tool: {
       /**
        * triage — Main skill routing tool.
