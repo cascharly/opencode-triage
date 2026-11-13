@@ -22,11 +22,12 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
 import { join } from "node:path"
+import { watch } from "node:fs"
 import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { THRESHOLD, checkTriageState, resolveAmbientConfig } from "./config.ts"
+import { THRESHOLD, ALWAYS_EXCLUDED_SKILLS, checkTriageState, resolveAmbientConfig } from "./config.ts"
 import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
@@ -35,19 +36,29 @@ const CURRENT_VERSION: string = (() => {
   catch { return "0.0.0" }
 })()
 
-function semverGt(a: string, b: string): boolean {
-  const pa = a.split(".").map(Number)
-  const pb = b.split(".").map(Number)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] ?? 0
-    const nb = pb[i] ?? 0
-    if (na > nb) return true
-    if (na < nb) return false
-  }
-  return false
-}
+const { semverGt } = require("../bin/shared.cjs") as { semverGt: (a: string, b: string) => boolean }
+
+const TOAST_VARIANTS = ["info", "success", "error", "warning"] as const
+
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+let _lastUpdateCheck = 0
+let _lastUpdateResult: string | null = null
 
 async function checkForUpdate(tui: any): Promise<void> {
+  const now = Date.now()
+  if (now - _lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) {
+    if (_lastUpdateResult) {
+      await tui.showToast({
+        body: {
+          message: `Update available: ${CURRENT_VERSION} → ${_lastUpdateResult} — npm install -g opencode-triage@latest`,
+          variant: "warning",
+        },
+      })
+    }
+    return
+  }
+  _lastUpdateCheck = now
+  _lastUpdateResult = null
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 3000)
@@ -59,6 +70,7 @@ async function checkForUpdate(tui: any): Promise<void> {
     const pkg = await res.json() as { version?: string }
     const latest = pkg.version
     if (latest && semverGt(latest, CURRENT_VERSION)) {
+      _lastUpdateResult = latest
       await tui.showToast({
         body: {
           message: `Update available: ${CURRENT_VERSION} → ${latest} — npm install -g opencode-triage@latest`,
@@ -86,11 +98,17 @@ async function checkForUpdate(tui: any): Promise<void> {
  * as fallback for users on older OpenCode versions.
  */
 export const server: Plugin = async ({ worktree, client }, options) => {
-  // Cache: discovered skills per worktree, with timestamp for invalidation
-  // Fixes edge case #4: previously cache was never invalidated after CLI toggle,
-  // causing "skill content unavailable" errors until OpenCode restart
+  // Cache: discovered skills per worktree, with timestamp for TTL-based invalidation.
+  // Augmented with fs.watch directory watchers (set up below) that invalidate
+  // immediately when skill files change on disk, so most triage calls hit the
+  // in-memory cache without any filesystem polling overhead.
+  // The 5s TTL is retained as safe fallback for environments where fs.watch
+  // is unavailable or returns incomplete events (e.g. network drives, WSL).
+  // Mutex prevents concurrent discovery when multiple triage calls arrive before
+  // discovery completes — subsequent calls await the in-flight promise.
   let cache: { skills: SkillEntry[]; timestamp: number } | null = null
-  const CACHE_TTL_MS = 5_000 // Re-discover every 5s to catch CLI toggles
+  let cacheMutex: Promise<void> | null = null
+  const CACHE_TTL_MS = 5_000
 
   // Rate limiting: track triage calls to prevent excessive LLM tool usage
   // Mitigates unbounded consumption attacks (LLM010)
@@ -118,21 +136,65 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   }
 
   /**
-   * Returns cached skills, re-discovering if the cache has expired.
+   * Returns cached skills, re-discovering if the cache has expired or was
+   * invalidated by a fs.watch event.
    *
-   * Uses a time-based cache (5s TTL) to balance performance with
-   * responsiveness to file system changes (e.g., CLI toggles).
+   * Primary invalidation: fs.watch fires synchronously on file changes and
+   * sets cache to null. Fallback: 5s TTL for environments where watchers
+   * may not fire reliably (network filesystems, WSL, some CI containers).
+   * Mutex serializes concurrent calls — only one discovery runs at a time.
    *
    * @returns Array of discovered skill entries
    */
   async function getCachedSkills(): Promise<SkillEntry[]> {
     const now = Date.now()
-    if (cache === null || now - cache.timestamp > CACHE_TTL_MS) {
-      const locations = buildSkillLocations(worktree)
-      cache = { skills: await discoverAllSkills(locations, getExcludedSkills), timestamp: now }
+    if (cache !== null && now - cache.timestamp <= CACHE_TTL_MS) {
+      return cache.skills
     }
-    return cache.skills
+    if (cacheMutex) {
+      await cacheMutex
+      return cache!.skills
+    }
+    cacheMutex = (async () => {
+      const locations = buildSkillLocations(worktree)
+      const skills = await discoverAllSkills(locations, getExcludedSkills)
+      cache = { skills, timestamp: Date.now() }
+    })()
+    try {
+      await cacheMutex
+    } finally {
+      cacheMutex = null
+    }
+    return cache!.skills
   }
+
+  // Watch all skill base directories for changes so the cache is
+  // invalidated the moment a skill file is added, removed, or renamed — rather
+  // than waiting up to 5s for the TTL. Watchers are best-effort: errors and
+  // unsupported paths are silently swallowed since the TTL covers the fallback.
+  // Close previously created watchers before setting up new ones to prevent
+  // resource leaks on hot-reload or worktree change.
+  let watchers: ReturnType<typeof watch>[] = []
+  const setupWatchers = async () => {
+    for (const w of watchers) {
+      try { w.close() } catch { /* ignore close errors */ }
+    }
+    watchers = []
+    try {
+      const locations = buildSkillLocations(worktree)
+      for (const { base } of locations) {
+        try {
+          watchers.push(watch(base, { recursive: true }, () => { cache = null }).unref())
+        } catch {
+          // Directory may not exist yet — watcher will not be set up for it.
+          // The 5s TTL fallback handles this case.
+        }
+      }
+    } catch {
+      // Ignore errors in watcher setup — TTL fallback is always present.
+    }
+  }
+  setupWatchers()
 
   // Cache triage state so hooks don't re-read config files on every call
   let triageStateCache: { state: "on" | "off" | "unknown"; ts: number } | null = null
@@ -150,8 +212,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     return triageStateCache.state
   }
 
-  // Ambient suggestion config, cached with the same TTL so config/env edits
-  // are picked up without restart-on-every-call overhead.
+  // ALWAYS_EXCLUDED_SKILLS is the immutable invariant — "triage" can never be routed to.
+  // OPENCODE_TRIAGE_EXCLUDED can add additional exclusions on top, but cannot remove
+  // entries from ALWAYS_EXCLUDED_SKILLS. This guarantees no infinite self-referencing loops
+  // regardless of user configuration.
   let ambientConfigCache: { cfg: AmbientConfig; ts: number } | null = null
   function getAmbientConfig(): AmbientConfig {
     const now = Date.now()
@@ -169,13 +233,13 @@ export const server: Plugin = async ({ worktree, client }, options) => {
    * to call triage() to load the full instructions. Only name+desc is injected
    * (never full content) to keep per-turn token cost minimal.
    */
-  async function buildSuggestionBlock(query: string, skipNames?: Set<string>): Promise<{ block: string; names: string[] } | null> {
+  async function buildSuggestionBlock(query: string): Promise<{ block: string; names: string[] } | null> {
     const cfg = getAmbientConfig()
     const skills = await getCachedSkills()
     if (skills.length === 0) return null
     const allScored = scoreSkills(query, skills)
     const scored = allScored
-      .filter(s => s.score >= cfg.ambientMinScore && !skipNames?.has(s.name))
+      .filter(s => s.score >= cfg.ambientMinScore)
       .sort((a, b) => b.score - a.score)
       .slice(0, cfg.ambientMaxCandidates)
     if (scored.length === 0) return null
@@ -194,13 +258,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
     return { block, names }
   }
 
-  // Exclude the triage skill itself — self-referencing would create infinite loops
-  // Can be overridden via OPENCODE_TRIAGE_EXCLUDED env var (comma-separated)
-  // Fixes edge case #13: previously hardcoded, no way to allow a skill named "triage"
   const getExcludedSkills = (): Set<string> => {
     const env = process.env.OPENCODE_TRIAGE_EXCLUDED
-    if (env) return new Set(env.split(",").map(s => s.trim()).filter(Boolean))
-    return new Set(["triage"])
+    if (!env) return ALWAYS_EXCLUDED_SKILLS
+    const extra = env.split(",").map(s => s.trim()).filter(Boolean)
+    return new Set([...ALWAYS_EXCLUDED_SKILLS, ...extra])
   }
 
   // Definition hook state tracking
@@ -233,32 +295,30 @@ export const server: Plugin = async ({ worktree, client }, options) => {
   // Do NOT restore .disabled files here — wait for hooks to confirm support.
   // If hooks fire, remigrateIfHooksDetected() restores them.
   // If hooks don't fire, skills stay hidden via .disabled files (file-rename fallback).
+  // Wrapped in try/catch to prevent unhandled promise rejection from crashing
+  // the plugin host if getTriageState() or getCachedSkills() throws on startup
   ;(async () => {
-    const state = await getTriageState()
-    if (state === "on") {
-      const skills = await getCachedSkills()
-      const projectN = skills.filter(s => s.scope === "project").length
-      const globalN = skills.filter(s => s.scope === "global").length
-      if (projectN > 0 || globalN > 0) {
+    try {
+      const state = await getTriageState()
+      if (state === "on") {
+        const skills = await getCachedSkills()
+        const projectN = skills.filter(s => s.scope === "project").length
+        const globalN = skills.filter(s => s.scope === "global").length
+        if (projectN > 0 || globalN > 0) {
+          await client.tui.showToast({
+            body: { message: `${projectN + globalN} skill(s) managed by triage`, variant: "info" },
+          })
+        }
+      } else if (state === "unknown") {
         await client.tui.showToast({
-          body: { message: `${projectN + globalN} skill(s) managed by triage`, variant: "info" },
+          body: { message: `Triage installed — run /triage on to enable`, variant: "warning" },
         })
       }
-    } else if (state === "unknown") {
-      await client.tui.showToast({
-        body: { message: `Triage installed — run /triage on to enable`, variant: "warning" },
-      })
+      checkForUpdate(client.tui)
+    } catch (err) {
+      console.error("[opencode-triage] Startup error:", err)
     }
-    checkForUpdate(client.tui)
   })()
-
-  // Context accumulation for ambient scoring. _contextText accumulates all
-  // message text within a single user turn (reset on each user message).
-  // _suggested tracks skill names already injected this turn for dedup.
-  // _firstInsert controls inject position: prepend on first, append on later.
-  let _contextText = ""
-  let _suggested = new Set<string>()
-  let _firstInsert = false
 
   return {
     tool: {
@@ -297,11 +357,9 @@ export const server: Plugin = async ({ worktree, client }, options) => {
            }).optional().describe("Optional: show a toast notification to the user"),
          },
         async execute(args, context) {
-          // Show optional toast notification
           if (args.toast) {
-            const validVariants = ["info", "success", "error", "warning"] as const
-            const variant = validVariants.includes(args.toast.variant as typeof validVariants[number])
-              ? (args.toast.variant as typeof validVariants[number])
+            const variant = TOAST_VARIANTS.includes(args.toast.variant as typeof TOAST_VARIANTS[number])
+              ? (args.toast.variant as typeof TOAST_VARIANTS[number])
               : "info"
             await client.tui.showToast({
               body: { message: args.toast.message, variant },
@@ -321,7 +379,10 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           }
 
           if (!checkTriageRateLimit()) {
-            return "Triage rate limit exceeded (20 calls/60s). Please wait before retrying."
+            await client.tui.showToast({
+              body: { message: "Triage rate limit exceeded (20 calls/60s). Please wait before retrying.", variant: "error" },
+            })
+            return "Triage rate limit exceeded. Please wait before retrying."
           }
 
           const query = (args.query ?? "").trim()
@@ -385,7 +446,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
               searchSuperpowers(),
             ])
             const combined = [skillsSh, superpowers].filter(Boolean).join("")
-            return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}`
+            const urls = [
+              "https://skills.sh/",
+              "https://github.com/obra/superpowers",
+            ].join("\n  ")
+            return `No skill matches "${query}". Try different keywords.${hint ? "\n\n" + hint : ""}${combined}\n\nResources:\n  ${urls}`
           }
 
           // Confidence gap: top match vs runner-up. Large gap = clear winner
@@ -437,57 +502,44 @@ export const server: Plugin = async ({ worktree, client }, options) => {
         "This tool is disabled. Use `triage` to discover and load specialized skills."
       if (!wasHookFired) await remigrateIfHooksDetected()
     },
-    "chat.message": async (input, output) => {
-      const cfg = getAmbientConfig()
-      if (!cfg.autoSuggest) return
-      const isUser = input.info?.type === "user" || input.info?.role === "user"
-      if (isUser) { _contextText = ""; _suggested = new Set(); _firstInsert = false }
-      const text = (output.parts ?? [])
-        .filter((p: any) => p?.type === "text" && typeof p.text === "string" && !p.synthetic)
-        .map((p: any) => p.text as string)
-        .join(" ")
-        .trim()
-      if (text) _contextText += (_contextText ? " " : "") + text
-    },
-    // ── Ephemeral suggestion injection ──────────────────────
-    // experimental.chat.messages.transform fires on every LLM request step.
-    // Injected parts are visible to the LLM for this turn only — output.messages
-    // is re-fetched from DB each iteration, so mutations never persist.
-    "experimental.chat.messages.transform": async (_input, output) => {
-      const cfg = getAmbientConfig()
-      if (!cfg.autoSuggest || !_contextText) return
-      let result = await buildSuggestionBlock(_contextText, _suggested)
-      // Stale _suggested from a previous session (same process) can block all
-      // candidates because buildSuggestionBlock filters out every name it contains.
-      // When that happens, clear the stale dedup set and retry once.
-      if (!result && _suggested.size > 0) {
-        _suggested = new Set()
-        result = await buildSuggestionBlock(_contextText, _suggested)
-      }
-      if (!result) return
-      for (const n of result.names) _suggested.add(n)
-      const msgs = output.messages ?? []
-      const part = { type: "text", text: result.block, synthetic: true } as any
-      if (!_firstInsert) {
-        _firstInsert = true
-        const lastUser = [...msgs].reverse().find((m: any) => m.info?.type === "user" || m.info?.role === "user")
-        if (lastUser) {
-          lastUser.parts.unshift(part)
-          return
-        }
-      }
-      msgs.push({ info: { type: "user", role: "user" }, parts: [part] } as any)
-    },
-    // ── System prompt cleanup ─────────────────────────────
+    // ── System prompt cleanup + triage directive injection ────────
     // Strips the <available_skills> XML block from the system prompt
     // as a belt-and-suspenders measure alongside tool.definition.
+    // Falls back silently if the experimental hook is not available.
+    // Also handles mid-session state changes: if triage toggled ON
+    // after startup, restore .disabled files here.
+    // Injects a directive that mandates calling the `triage` tool first,
+    // so the LLM has an explicit, hard-to-ignore instruction instead of
+    // relying on the tool description alone.
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const cfg = getAmbientConfig()
+      if (!cfg.autoSuggest || await getTriageState() !== "on") return
+      const lastUser = [...output.messages].reverse().find(m => m.info.role === "user")
+      if (!lastUser) return
+      const text = lastUser.parts
+        .filter(p => p.type === "text" && !p.synthetic)
+        .map(p => p.type === "text" ? p.text : "")
+        .join(" ").trim()
+      if (!text) return
+      const result = await buildSuggestionBlock(text)
+      if (!result) return
+      // Context is derived from this request, so sessions and tool steps cannot
+      // share stale suggestions. Mutations are ephemeral and never persisted.
+      lastUser.parts = lastUser.parts.filter(p => !(p.type === "text" && p.synthetic && p.text.startsWith("<suggested_skills>")))
+      lastUser.parts.unshift({
+        type: "text", id: `prt_triage_${lastUser.info.id}`,
+        sessionID: lastUser.info.sessionID, messageID: lastUser.info.id,
+        text: result.block, synthetic: true,
+      })
+    },
     "experimental.chat.system.transform": async (_input, output) => {
       const state = await getTriageState()
       if (state !== "on") return
       if (!migrationCompleted) await remigrateIfHooksDetected()
       const re = /<available_skills>[\s\S]*?<\/available_skills>/g
+      const directive = "\n\nBefore any task, call the `triage` tool to discover specialized skills. Pass a brief query. Load the matched skill's content and follow its instructions.\n"
       for (let i = 0; i < output.system.length; i++) {
-        output.system[i] = output.system[i].replace(re, "")
+        output.system[i] = output.system[i].replace(re, "").trimEnd() + directive
       }
     },
     // ── Skill call interception ───────────────────────────
@@ -508,7 +560,8 @@ export const server: Plugin = async ({ worktree, client }, options) => {
       const result = output.output
       if (typeof result !== "string") return
       if (input.tool === "triage") {
-        const first = result.split("\n")[0] ?? ""
+        const newlineIdx = result.indexOf("\n")
+        const first = newlineIdx === -1 ? result : result.slice(0, newlineIdx)
         if (first.startsWith("SKILL ROUTED:")) {
           const skillName = first.replace("SKILL ROUTED:", "").trim()
           await client.tui.showToast({
@@ -517,11 +570,11 @@ export const server: Plugin = async ({ worktree, client }, options) => {
           const bodyIndex = result.indexOf("\n\n")
           if (bodyIndex !== -1) {
             const body = result.slice(bodyIndex + 2).trimStart()
-            if (body.startsWith("(skill content truncated")) {
+            if (body.startsWith("__TRIAGE_TRUNCATED__")) {
               await client.tui.showToast({
                 body: { message: `Skill "${skillName}" exceeds 1MB limit — truncated`, variant: "warning" },
               })
-            } else if (body.startsWith("(skill content unavailable")) {
+            } else if (body.startsWith("__TRIAGE_UNAVAILABLE__")) {
               await client.tui.showToast({
                 body: { message: `Could not read skill file for "${skillName}"`, variant: "error" },
               })

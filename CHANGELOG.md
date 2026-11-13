@@ -5,6 +5,30 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] — 2026-05-20
+
+### Added
+
+- **Shared skill directories module** — introduced a central source of truth (`bin/skill-dirs.cjs`) containing standard skill directory subpaths and a resolver function, shared between the CLI and the plugin.
+
+### Changed
+
+- **Scoring pipeline performance upgrades** — Pre-compiled RegExp patterns and pre-computed stemming for query words to avoid $O(W \times S)$ RegExp allocations, reducing per-request overhead to $O(W)$.
+- **Robust description stem cache** — Introduced a path-keyed stemmed description cache (`_stemmedDescCache`) that validates description string equality, guaranteeing flawless resilience against mock path collisions in unit tests.
+- **Spellcheck engine optimization** — Replaced expensive array allocations (`[...vocab].some()`) with $O(1)$ `vocab.has()` set lookups, and implemented length-difference early-exits to bypass ~90% of costly Levenshtein distance DP matrix calculations.
+- **Frontmatter parser improvements** — Cached RegExp compilations at the module level in `src/utils.ts` and replaced RegExp-based body boundary detection with `indexOf` substring slicing in `src/discovery.ts` to ensure consistency and eliminate ReDoS vectors.
+- **Active cache invalidation** — Added `fs.watch` directory watchers inside the plugin's cached skills getter to immediately invalidate the cache when files are added, removed, or modified.
+- **Boilerplate cleanup** — Extracted and imported `semverGt` from `bin/shared.cjs` to deduplicate utility definitions. Replaced duplicate traversal code in `scripts/simulate.ts` with clean imports from `src/discovery.ts`. Added clear architecture comments to the CLI explaining the intentional traversal duplication for zero-build ESM/CJS compatibility.
+- **Skill discovery optimized** — reduced disk I/O by caching and retrieving file sizes during the initial discovery scan, cutting filesystem reads in half.
+- **Test suite cleanup** — deduplicated `stripJsoncComments` unit test code in `test/cli-utils.test.ts` by importing directly from `src/config.ts`.
+
+### Fixed
+
+- **CLI-plugin discovery synchronization** — resolved a discovery discrepancy where the `/triage status` command missed skills located in the `~/.gemini/config/skills/` directory by aligning the CLI scan paths with the runtime plugin router via the shared locations module.
+- **YAML folded description parser** — resolved a bug in multi-line frontmatter parser (`>`) to successfully extract complete multi-line descriptions instead of truncating them.
+- **UTF-8 safe size enforcement** — replaced character length checks with strict buffer byte-length checks for the 1MB single-file size ceiling.
+- **Simulation script imports** — restored correct imports in `scripts/simulate.ts` that previously pointed to non-existent paths.
+
 ## [1.3.3] — 2026-05-16
 
 ### Added

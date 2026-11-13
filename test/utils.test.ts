@@ -43,7 +43,7 @@ Some content here.`
     assert.equal(extractFrontmatter(content, "description"), "Backup and restore databases")
   })
 
-  it("extracts first line of folded description (> syntax)", () => {
+  it("extracts all lines of folded description (> syntax)", () => {
     const content = `---
 name: my-skill
 description: >
@@ -51,9 +51,7 @@ description: >
   folded description
 ---
 Body.`
-    // With m flag, $ matches end-of-line, so multi-line folded blocks
-    // only capture the first line. This is a known limitation.
-    assert.equal(extractFrontmatter(content, "description"), "This is a long")
+    assert.equal(extractFrontmatter(content, "description"), "This is a long folded description")
   })
 
   it("returns null when key missing", () => {
@@ -208,10 +206,40 @@ describe("isValidSkillName", () => {
     assert.equal(isValidSkillName("foo\\bar"), false)
   })
 
+  it("rejects null byte", () => {
+    assert.equal(isValidSkillName("foo\0bar"), false)
+  })
+
   it("accepts normal names", () => {
     assert.equal(isValidSkillName("backup-restore"), true)
     assert.equal(isValidSkillName("my_cool_skill"), true)
     assert.equal(isValidSkillName("web-design"), true)
+  })
+
+  it("rejects Windows reserved device names (CON, PRN, AUX, NUL)", () => {
+    assert.equal(isValidSkillName("CON"), false)
+    assert.equal(isValidSkillName("PRN"), false)
+    assert.equal(isValidSkillName("AUX"), false)
+    assert.equal(isValidSkillName("NUL"), false)
+  })
+
+  it("rejects Windows COM and LPT ports", () => {
+    assert.equal(isValidSkillName("COM1"), false)
+    assert.equal(isValidSkillName("COM9"), false)
+    assert.equal(isValidSkillName("LPT1"), false)
+    assert.equal(isValidSkillName("LPT9"), false)
+  })
+
+  it("rejects Windows reserved names case-insensitively", () => {
+    assert.equal(isValidSkillName("con"), false)
+    assert.equal(isValidSkillName("Con"), false)
+    assert.equal(isValidSkillName("cOn"), false)
+    assert.equal(isValidSkillName("com5"), false)
+  })
+
+  it("does not match reserved name as substring", () => {
+    assert.equal(isValidSkillName("CONTAINS"), true, "substring match should not block valid names")
+    assert.equal(isValidSkillName("auxiliary"), true, "prefix match should not block valid names")
   })
 })
 
@@ -450,3 +478,38 @@ describe("scoring scenarios", () => {
     assert.equal(sorted[0].scope, "project")
   })
 })
+
+// ── sanitizeSkillContent ──────────────────────────────────
+
+describe("sanitizeSkillContent", () => {
+  it("removes script tags", () => {
+    const raw = "hello <script>alert(1)</script> world"
+    assert.equal(sanitizeSkillContent(raw), "hello [script removed] world")
+  })
+
+  it("removes iframe tags", () => {
+    const raw = "hello <iframe src='hack'></iframe> world"
+    assert.equal(sanitizeSkillContent(raw), "hello [iframe removed] world")
+  })
+
+  it("removes quoted event handler attributes", () => {
+    const raw = '<div onclick="alert(1)" class="button">click me</div>'
+    assert.equal(sanitizeSkillContent(raw), '<div [event handler removed] class="button">click me</div>')
+  })
+
+  it("removes unquoted event handler attributes", () => {
+    const raw = '<div onclick=alert(1) class=button>click me</div>'
+    assert.equal(sanitizeSkillContent(raw), '<div [event handler removed] class=button>click me</div>')
+  })
+
+  it("removes javascript URIs", () => {
+    const raw = '<a href="javascript:alert(1)">click me</a>'
+    assert.equal(sanitizeSkillContent(raw), '<a href="[javascript uri removed]alert(1)">click me</a>')
+  })
+
+  it("does not remove safe attributes or content", () => {
+    const raw = '<div class="btn" data-id="123">hello</div>'
+    assert.equal(sanitizeSkillContent(raw), raw)
+  })
+})
+
