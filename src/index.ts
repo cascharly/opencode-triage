@@ -8,11 +8,9 @@
  * that discovers SKILL.md files and routes LLM queries to matching skills via
  * keyword scoring.
  *
- * Layers of defense (no file renaming needed when hooks are available):
- *   1. tool.definition    — replaces built-in `skill` tool description
- *   2. system.transform   — strips <available_skills> from system prompt
- *   3. tool.execute.before — intercepts stray skill() calls
- *   4. File rename        — CLI fallback when hooks not supported
+ * Search and loading are separate: triage discovers relevant metadata,
+ * native skill loads active files, and load-skill reads legacy disabled files.
+ * Hooks hide the complete catalog while preserving these loading paths.
  *
  * Install:  { "plugin": ["opencode-triage"] }  in opencode.json
  * Toggle:   /triage on   |   /triage off
@@ -90,13 +88,8 @@ async function checkForUpdate(tui: any): Promise<void> {
 /**
  * Triage skill router plugin — main entry point.
  *
- * Registers the `triage` and `notify` custom tools, plus a layered
- * defense system that hides the native `skill` tool from the LLM:
- *
- *   Layer 1: `tool.definition` — replaces skill tool description
- *   Layer 2: `experimental.chat.system.transform` — strips skills XML
- *   Layer 3: `tool.execute.before` — intercepts stray skill() calls
- *   Fallback: CLI file rename — when hooks aren't supported
+ * Registers search, catalog, and legacy loading tools. Hook transforms hide
+ * the full native catalog; request-specific suggestions expose relevant names.
  *
  * Skills are discovered from SKILL.md (primary) with SKILL.md.disabled
  * as fallback for users on older OpenCode versions.

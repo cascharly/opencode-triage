@@ -14,7 +14,7 @@ Restart OpenCode, then type `/triage on`. That's it.
 
 OpenCode lists every skill's name and description in the prompt on every message. With many skills, that burns hundreds of tokens before you type a word.
 
-Triage hides all skills from the prompt. When you need one, the LLM calls `triage()` — the plugin finds the best match by keyword scoring and loads only that skill's instructions.
+Triage hides all skills from the prompt. When you need one, the LLM calls `triage()` — the plugin returns matching skills by keyword scoring. The LLM then loads the chosen instructions with `skill` or the legacy `load-skill` fallback.
 
 ```
 No triage:   [name+desc of A] [name+desc of B] [name+desc of C] ...  ← every message
@@ -191,11 +191,11 @@ Skills live in up to seven directories:
 | `~/.claude/skills/<name>/` | Global |
 | `~/.agents/skills/<name>/` | Global |
 
-When triage is ON, skills are hidden from the LLM using three layers of hooks — no file renaming needed:
+When triage is ON, hooks hide the full skill catalog while keeping loading available:
 
-1. **`tool.definition`** — Replaces the built-in `skill` tool description with "Use `triage` instead"
-2. **`system.transform`** — Strips the `<available_skills>` XML block from the system prompt
-3. **`tool.execute.before`** — Intercepts any stray `skill()` calls and blocks them
+1. **`tool.definition`** replaces the native skill description with compact loading instructions.
+2. **`system.transform`** strips the `<available_skills>` XML block from the system prompt.
+3. Native `skill()` calls load discovered skills. `load-skill()` handles legacy `.disabled` files.
 
 `SKILL.md` files stay intact on disk. Other AI tools (Claude Code, Cursor, Windsurf) scanning the same directories still see them normally.
 
@@ -213,9 +213,9 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 
 3. **Spell Correction** — If a query word (length ≥ 4) has no exact match in any skill name or description, the plugin computes Levenshtein distance against all skill vocabulary and suggests the closest match (distance ≤ 2). The hint is injected into the tool result for the LLM to self-correct silently.
 
-4. **Route** — Auto-selects the clear winner (gap ≥ 30) or returns a top-5 shortlist for manual pick. Spell correction hints are included in all response paths so the LLM can retry with the corrected term if needed.
+4. **Search** returns up to eight scored candidates and spell correction hints without loading skill instructions.
 
-5. **Load** — Reads the matched file, strips frontmatter, returns the instructions.
+5. **Load** uses native `skill({ name })` for active files, or `load-skill({ name })` for file-hidden results.
 
 6. **Notify** — Shows a TUI toast confirming the routing result.
 
@@ -244,3 +244,5 @@ MIT
 ### Search and load tools
 
 `triage` searches installed skills without loading their instructions. Use native `skill({ name })` to load a result, or `load-skill({ name })` for results marked file-hidden. `list-skills` lists the installed catalog on demand. The fallback loader supports legacy `SKILL.md.disabled` files.
+
+Automatic suggestions use only the current user message and expose at most three candidates by default. Configure `autoSuggest`, `ambientMinScore` (default 30), and `ambientMaxCandidates` (default 3, capped at 10) in plugin options. English scoring retains its minimum word length and position decay; Chinese queries use word segmentation.
