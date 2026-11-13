@@ -4,6 +4,8 @@
  */
 
 const fs = require("fs")
+const path = require("path")
+const { collectWindowsConfigDiagnostics } = require("../config-diagnostics.cjs")
 const { stripJsoncComments, extractFrontmatterField } = require("../shared.cjs")
 const {
   PLUGIN_NAME, findTriageIndex, collectSkills, collectConfigState,
@@ -12,7 +14,7 @@ const {
 
 module.exports = function showStatus(ctx) {
   const {
-    SKILL_DIRS, LOCAL_CMD_FILE, GLOBAL_CMD_FILE, LOCAL_CFG_PATH, GLOBAL_CFG_PATH,
+    SKILL_DIRS, LOCAL_CMD_FILE, GLOBAL_CMD_FILE, LOCAL_CFG_PATH, GLOBAL_CFG_PATH, WINDOWS_APPDATA_CFG_PATH,
     isJson, showAll, colors,
   } = ctx
   const { YELLOW, GREEN, RED, CYAN, RESET, BOLD, DIM } = colors
@@ -30,6 +32,7 @@ module.exports = function showStatus(ctx) {
   const totalHidden = projHidden + gloHidden
   const totalExposed = projExposed + gloExposed
   const hiddenTokens = calcHiddenSkillTokens(SKILL_DIRS)
+  const windowsConfig = collectWindowsConfigDiagnostics(GLOBAL_CFG_PATH, WINDOWS_APPDATA_CFG_PATH)
 
   const TOOL_DEF_TEXT =
     "Discover and route to the right specialized skill. " +
@@ -55,6 +58,40 @@ module.exports = function showStatus(ctx) {
   const projState = effectiveState("project")
   const gloState = effectiveState("global")
 
+  function effectiveCounts(scope) {
+    const mode = scope === "project" ? localMode : globalMode
+    const skillsArr = scope === "project" ? projSkills : gloSkills
+    const fileHidden = skillsArr.filter(s => s.state === "hidden").length
+    const fileExposed = skillsArr.filter(s => s.state === "exposed").length
+    const hooksActive = mode === "auto"
+    const promptHidden = hooksActive ? fileHidden + fileExposed : fileHidden
+    const promptExposed = hooksActive ? 0 : fileExposed
+    const hasSkills = skillsArr.length > 0
+    return {
+      hooksActive,
+      fileHidden,
+      fileExposed,
+      promptHidden,
+      promptExposed,
+      effectiveHidden: promptHidden,
+      effectiveExposed: promptExposed,
+      hideMode: hasSkills && hooksActive ? "hooks" : hasSkills && fileHidden > 0 && fileExposed === 0 ? "file" : "none",
+    }
+  }
+
+  const projEffective = effectiveCounts("project")
+  const gloEffective = effectiveCounts("global")
+  const totalEffective = {
+    hooksActive: projEffective.hooksActive || gloEffective.hooksActive,
+    fileHidden: projEffective.fileHidden + gloEffective.fileHidden,
+    fileExposed: projEffective.fileExposed + gloEffective.fileExposed,
+    promptHidden: projEffective.promptHidden + gloEffective.promptHidden,
+    promptExposed: projEffective.promptExposed + gloEffective.promptExposed,
+    effectiveHidden: projEffective.effectiveHidden + gloEffective.effectiveHidden,
+    effectiveExposed: projEffective.effectiveExposed + gloEffective.effectiveExposed,
+    hideMode: (projEffective.hideMode === "hooks" || gloEffective.hideMode === "hooks") ? "hooks" : totalHidden > 0 && totalExposed === 0 ? "file" : "none",
+  }
+
   function stateColor(state) { return state === "on" ? GREEN : YELLOW }
   function stateText(state) {
     return state === "on" ? "ON" : state === "off" ? "OFF" : state === "mixed" ? "MIXED" : "—"
@@ -67,20 +104,21 @@ module.exports = function showStatus(ctx) {
     const hidden = skillsArr.filter(s => s.state === "hidden").length
     const exposed = skillsArr.filter(s => s.state === "exposed").length
 
+    if (skillsArr.length === 0) return "file: none · prompt: none"
     if (mode === "auto") {
-      const parts = [GREEN + "hooks" + RESET]
-      if (hidden > 0) parts.push(`${hidden} file-hidden`)
-      if (exposed > 0) parts.push(GREEN + `${exposed} exposed (hooks)` + RESET)
+      const fileState = hidden > 0 && exposed > 0 ? `mixed (${hidden} hidden, ${exposed} exposed)` : hidden > 0 ? "hidden" : "exposed"
+      const parts = [`file: ${fileState}`, GREEN + "prompt: hidden by hooks" + RESET]
       return parts.join(" · ")
     }
     if (active && mode === "manual") {
-      const parts = [YELLOW + "hooks off (manual)" + RESET]
-      if (hidden > 0) parts.push(GREEN + `${hidden} file-hidden` + RESET)
-      if (exposed > 0) parts.push(`${exposed} exposed`)
+      const fileState = hidden > 0 && exposed > 0 ? `mixed (${hidden} hidden, ${exposed} exposed)` : hidden > 0 ? "hidden" : "exposed"
+      const promptState = exposed > 0 ? YELLOW + "prompt: exposed" + RESET : GREEN + "prompt: hidden by file rename" + RESET
+      const parts = [YELLOW + "hooks off (manual)" + RESET, `file: ${fileState}`, promptState]
       return parts.join(" · ")
     }
-    if (hidden > 0) return GREEN + `${hidden} file-hidden` + RESET + " (no hooks)"
-    return exposed + " exposed (no hooks)"
+    // Not active in config
+    if (hidden > 0) return `file: hidden · ${GREEN}prompt: hidden by file rename${RESET} · no hooks`
+    return `file: exposed · ${YELLOW}prompt: exposed${RESET} · no hooks`
   }
 
   const outOfSync = []
@@ -102,6 +140,7 @@ module.exports = function showStatus(ctx) {
         hidden: projHidden,
         exposed: projExposed,
         total: projHidden + projExposed,
+        ...projEffective,
         command: fs.existsSync(LOCAL_CMD_FILE) ? "found" : "not found",
         config: { active: localActive, mode: localMode },
       },
@@ -110,10 +149,12 @@ module.exports = function showStatus(ctx) {
         hidden: gloHidden,
         exposed: gloExposed,
         total: gloHidden + gloExposed,
+        ...gloEffective,
         command: fs.existsSync(GLOBAL_CMD_FILE) ? "found" : "not found",
         config: { active: globalActive, mode: globalMode },
       },
-      totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed },
+      totals: { hidden: totalHidden, exposed: totalExposed, total: totalHidden + totalExposed, ...totalEffective },
+      windows_config: windowsConfig,
       tokens_saved: netSavings > 0 ? netSavings : 0,
       out_of_sync: outOfSync.length > 0 ? outOfSync : null,
       skills: skills.map(s => ({ name: s.name, state: s.state, scope: s.scope, dir: s.label, duplicate: dupNames.has(s.name) })),
@@ -134,12 +175,12 @@ module.exports = function showStatus(ctx) {
   const projLabel = projSkills.length > 0 ? stateColor(projState) + stateText(projState) + RESET : DIM + "—" + RESET
   const projDef = defenseDesc("project")
   const projCmd = fs.existsSync(LOCAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
-  console.log(`  Project:  ${projLabel}  │  ${projHidden + projExposed} skills  │  ${projDef}  │  ${projCmd}`)
+  console.log(`  Project:  ${projLabel}  │  ${projHidden + projExposed} skills  │  ${projDef}  │  command: ${projCmd}`)
 
   const gloLabel = gloSkills.length > 0 ? stateColor(gloState) + stateText(gloState) + RESET : DIM + "—" + RESET
   const gloDef = defenseDesc("global")
   const gloCmd = fs.existsSync(GLOBAL_CMD_FILE) ? GREEN + "✓" + RESET : DIM + "✗" + RESET
-  console.log(`  Global:   ${gloLabel}  │  ${gloHidden + gloExposed} skills  │  ${gloDef}  │  ${gloCmd}`)
+  console.log(`  Global:   ${gloLabel}  │  ${gloHidden + gloExposed} skills  │  ${gloDef}  │  command: ${gloCmd}`)
   console.log()
 
   if (outOfSync.length > 0) {
@@ -148,6 +189,19 @@ module.exports = function showStatus(ctx) {
   }
   if (hookNotes.length > 0) {
     console.log(`  ${DIM}ℹ ${hookNotes.join("\n  ℹ ")}${RESET}`)
+    console.log()
+  }
+
+  if (windowsConfig) {
+    const differText = windowsConfig.sameHash
+      ? "config files match"
+      : `config files differ${windowsConfig.differingSections.length > 0 ? ": " + windowsConfig.differingSections.join(", ") : ""}`
+    const userStatus = windowsConfig.userConfig.pluginPresent ? GREEN + "plugin present" + RESET : YELLOW + "plugin missing" + RESET
+    const appDataStatus = windowsConfig.appDataConfig.pluginPresent ? GREEN + "plugin present" + RESET : YELLOW + "plugin missing" + RESET
+    console.log(`  ${BOLD}Windows config check:${RESET}`)
+    console.log(`    ~/.config/opencode/${path.basename(windowsConfig.userConfig.path)}: ${userStatus} · sha256:${windowsConfig.userConfig.hash || "unreadable"}`)
+    console.log(`    %APPDATA%/opencode/${path.basename(windowsConfig.appDataConfig.path)}: ${appDataStatus} · sha256:${windowsConfig.appDataConfig.hash || "unreadable"}`)
+    console.log(`    ${differText}`)
     console.log()
   }
 

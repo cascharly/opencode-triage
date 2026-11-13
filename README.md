@@ -58,6 +58,8 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 All commands also work in your terminal: `npx opencode-triage <command>`. No OpenCode session needed.
 
+For automation, call `npx opencode-triage <command> --json` directly and ensure any wrapper writes its own warnings to stderr, not stdout. A wrapper that prepends text to stdout will make otherwise-valid JSON unparseable.
+
 ### Configuration Combinations
 
 | State | Global | Project | How to configure |
@@ -203,6 +205,8 @@ The CLI can still rename files (`SKILL.md` ↔ `SKILL.md.disabled`) as a fallbac
 
 The `/triage status` command shows skills grouped by scope with `[hidden]`/`[exposed]` badges, detecting state from both hook config and file extensions. It warns when the plugin is ACTIVE but some skills remain exposed (out-of-sync state).
 
+`/triage status --json` reports both file-level state (`fileHidden`, `fileExposed`) and prompt-level effective state (`promptHidden`, `promptExposed`, `hideMode`). On Windows, if both `~/.config/opencode/opencode.json*` and `%APPDATA%/opencode/opencode.json*` exist, status also reports whether each contains the plugin plus redacted config hashes and differing top-level sections.
+
 ### How Routing Works
 
 The triage router is a registered plugin tool. When called, it runs a deterministic routing process:
@@ -252,3 +256,5 @@ Automatic suggestions use only the current user message and expose at most three
 Run `npx opencode-triage download-model` once to download the local multilingual embedding model, then restart OpenCode. The plugin uses only cached model files and never downloads a model during a chat. If optional dependencies, the model, or inference are unavailable, routing falls back to keyword matching. Set the plugin option `semanticMatching: false` to use keyword matching explicitly. Skill discovery retains automatic cache invalidation; `rescan` also refreshes it on demand.
 
 The model cache is `~/.cache/opencode-triage/models/`. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`.
+
+`dedupe --json` requires `--dry-run` when duplicates exist; omit `--json` to choose interactively which copy to remove.

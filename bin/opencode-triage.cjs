@@ -53,12 +53,34 @@ description: Toggle, inspect, and benchmark the triage skill router
 Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
 If output contains "Restart opencode", tell the user to restart.
 `
-const LOCAL_CFG_PATH  = path.join(WORKTREE, ".opencode", "opencode.json")
+const LOCAL_CFG_PATH = (() => {
+  const jsonPath = path.join(WORKTREE, ".opencode", "opencode.json")
+  const jsoncPath = path.join(WORKTREE, ".opencode", "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return jsonPath
+})()
 const LOCAL_CMD_DIR   = path.join(WORKTREE, ".opencode", "commands")
 const LOCAL_CMD_FILE  = path.join(LOCAL_CMD_DIR, "triage.md")
-const GLOBAL_CFG_PATH = path.join(HOMEDIR, ".config", "opencode", "opencode.jsonc")
+const GLOBAL_CFG_PATH = (() => {
+  const jsonPath = path.join(HOMEDIR, ".config", "opencode", "opencode.json")
+  const jsoncPath = path.join(HOMEDIR, ".config", "opencode", "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return jsoncPath
+})()
 const GLOBAL_CMD_DIR  = path.join(HOMEDIR, ".config", "opencode", "commands")
 const GLOBAL_CMD_FILE = path.join(GLOBAL_CMD_DIR, "triage.md")
+const WINDOWS_APPDATA_CFG_PATH = (() => {
+  if (process.platform !== "win32" || !process.env.APPDATA) return null
+  const dir = path.join(process.env.APPDATA, "opencode")
+  const jsonPath = path.join(dir, "opencode.json")
+  const jsoncPath = path.join(dir, "opencode.jsonc")
+  if (fs.existsSync(jsonPath)) return jsonPath
+  if (fs.existsSync(jsoncPath)) return jsoncPath
+  return null
+})()
+
 
 // Single source of truth: shared with src/discovery.ts — both stay in sync
 const { buildLocations } = require("./skill-dirs.cjs")
@@ -84,7 +106,7 @@ function main() {
   const toggleScope = scopeFlag || "both"
 
   const ctx = {
-    SKILL_DIRS, LOCAL_CMD_FILE, GLOBAL_CMD_FILE, LOCAL_CFG_PATH, GLOBAL_CFG_PATH,
+    SKILL_DIRS, LOCAL_CMD_FILE, GLOBAL_CMD_FILE, LOCAL_CFG_PATH, GLOBAL_CFG_PATH, WINDOWS_APPDATA_CFG_PATH,
     isJson, showAll, isDryRun, colors,
   }
 

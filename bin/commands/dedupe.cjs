@@ -9,13 +9,17 @@ const readline = require("readline")
 const { collectSkills, findDuplicateNames, safeRenameSync } = require("../helpers.cjs")
 
 module.exports = function dedupeSkills(ctx) {
-  const { SKILL_DIRS, isDryRun, colors } = ctx
+  const { SKILL_DIRS, isDryRun, isJson, colors } = ctx
   const { YELLOW, GREEN, RED, RESET, BOLD, DIM } = colors
 
   const skills = collectSkills(SKILL_DIRS)
   const dupNames = findDuplicateNames(skills)
 
   if (dupNames.size === 0) {
+    if (isJson) {
+      console.log(JSON.stringify({ ok: true, dryRun: isDryRun, changed: false, duplicates: [] }, null, 2))
+      return
+    }
     console.log()
     console.log("No duplicate skills found. Nothing to deduplicate.")
     console.log()
@@ -28,6 +32,21 @@ module.exports = function dedupeSkills(ctx) {
       if (!dupGroups[s.name]) dupGroups[s.name] = { project: null, global: null }
       dupGroups[s.name][s.scope] = s
     }
+  }
+
+  if (isJson) {
+    const duplicates = Object.entries(dupGroups).map(([name, group]) => ({
+      name,
+      project: group.project ? { dir: group.project.label, path: group.project.dirPath, state: group.project.state } : null,
+      global: group.global ? { dir: group.global.label, path: group.global.dirPath, state: group.global.state } : null,
+    }))
+    if (!isDryRun) {
+      console.log(JSON.stringify({ ok: false, changed: false, error: "Duplicate removal requires interactive selection. Use --dry-run --json to inspect duplicates, or omit --json to select a copy to remove.", duplicates }, null, 2))
+      process.exitCode = 1
+      return
+    }
+    console.log(JSON.stringify({ ok: true, dryRun: isDryRun, changed: false, changesPending: duplicates.length > 0, duplicates }, null, 2))
+    return
   }
 
   if (isDryRun) {
