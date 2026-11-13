@@ -16,6 +16,7 @@ import { createRequire } from "node:module"
 
 const require = createRequire(import.meta.url)
 const { stripJsoncComments: _stripJsoncComments } = require("../bin/shared.cjs")
+const { readTriageOptions } = require("../bin/plugin-config.cjs") as { readTriageOptions(config: unknown): Record<string, unknown> | null }
 
 // ── Scoring constants ──────────────────────────────────────
 
@@ -160,13 +161,9 @@ export async function getTriageStateFromPath(path: string): Promise<"on" | "off"
   try {
     const raw = await readFile(path, "utf-8")
     const json = JSON.parse(stripJsoncComments(raw))
-    const plugin: unknown[] = json.plugin ?? []
-    for (const p of plugin) {
-      if (!Array.isArray(p) || p[0] !== "opencode-triage") continue
-      const opts = p[1] as Record<string, unknown> | undefined
-      if (opts?.autoHide === true)  return "on"
-      if (opts?.autoHide === false) return "off"
-    }
+    const opts = readTriageOptions(json)
+    if (opts?.autoHide === true) return "on"
+    if (opts?.autoHide === false) return "off"
     return "unknown"
   } catch { return "unknown" }
 }
@@ -190,6 +187,8 @@ export async function checkTriageState(
   const paths = [
     join(worktree, ".opencode", "opencode.json"),
     join(worktree, ".opencode", "opencode.jsonc"),
+    join(worktree, "opencode.json"),
+    join(worktree, "opencode.jsonc"),
     join(homedir(), ".config", "opencode", "opencode.json"),
     join(homedir(), ".config", "opencode", "opencode.jsonc"),
   ]
@@ -216,6 +215,8 @@ export function configPaths(worktree: string): string[] {
   return [
     join(worktree, ".opencode", "opencode.json"),
     join(worktree, ".opencode", "opencode.jsonc"),
+    join(worktree, "opencode.json"),
+    join(worktree, "opencode.jsonc"),
     join(homedir(), ".config", "opencode", "opencode.json"),
     join(homedir(), ".config", "opencode", "opencode.jsonc"),
   ]
@@ -231,12 +232,7 @@ export function getTriageOptionsFromPath(path: string): Record<string, unknown> 
   try {
     const raw = readFileSync(path, "utf-8")
     const json = JSON.parse(stripJsoncComments(raw))
-    const plugin: unknown[] = json.plugin ?? []
-    for (const p of plugin) {
-      if (!Array.isArray(p) || p[0] !== "opencode-triage") continue
-      return (p[1] as Record<string, unknown>) ?? {}
-    }
-    return null
+    return readTriageOptions(json)
   } catch { return null }
 }
 

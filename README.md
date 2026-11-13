@@ -239,9 +239,25 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 
 ## Compatibility
 
-- OpenCode 1.14+ plugin API; validated with 1.19.5
-- Bun runtime (bundled with OpenCode)
-- Node.js 18+ (for CLI script)
+The same package selects the supported API automatically:
+
+| OpenCode host | Loaded package entry | Configuration |
+|---|---|---|
+| V1 | `.` / `src/index.ts` | Existing `plugin` strings or tuples |
+| V2 | `./server` / `src/server.ts` | `plugins` strings or package/options objects |
+
+OpenCode V2's official loader resolves `./server` first. Older V1 loaders continue loading the package root, which exports only the callable `server` function. This does not require the V1 object-entrypoint support introduced in 1.18.29 and does not change the existing V1 peer dependency range. An internal V2 setup error is reported instead of silently retrying initialization as V1.
+
+V1 config remains valid and is never rewritten into V2 syntax by the CLI. Existing V2 configs retain their `plugins` format. Toggles preserve other plugin options and version pins.
+
+- V1 installed-package execution tested with SDK 1.14.17 and 1.19.5 under Bun.
+- V2 registration and request hooks tested against SDK 2.3.0; the installed package is also loaded with its official host resolver.
+- The V2 SDK is a development-only dependency. V1 consumers do not need to install it.
+- V2 routes native loads through `skill({ id })`; V1 retains `skill({ name })`. Legacy loads in V2 enforce the host's skill permission rules.
+- V2 status notifications currently go to the server log; V1 TUI toasts remain available.
+- Basic CLI commands require Node.js 18+. Development tests require Node.js 22+.
+
+Run `npm run check`, `npm test`, and `npm run check:compat` before changing the adapters. The compatibility script requires Bun on PATH, or `BUN_BIN` set to its executable path. It installs the packed artifact in isolated temporary projects rather than relying on workspace links.
 
 ## License
 
