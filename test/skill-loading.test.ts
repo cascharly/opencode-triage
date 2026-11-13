@@ -12,7 +12,7 @@ it("searches and loads file-hidden skills without relying on the native loader",
     const dir = join(root, ".agents/skills/qzxhidden")
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, "SKILL.md.disabled"), "---\nname: qzxhidden\ndescription: qzxhidden <tag> & tools\n---\n\nPrivate workflow instructions.")
-    plugin = await server({ worktree: root, client: { tui: { showToast: async () => {} } } } as any, { autoHide: false })
+    plugin = await server({ worktree: root, client: { tui: { showToast: async () => {} } } } as any, { autoHide: false, semanticMatching: false })
     const context = { abort: new AbortController().signal } as any
     const found = await plugin.tool!.triage.execute({ query: "qzxhidden" }, context)
     assert.ok(typeof found === "string")

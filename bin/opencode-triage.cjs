@@ -412,6 +412,8 @@ function showHelp() {
   console.log(DIM + "  SKILL.md files stay intact — other AI tools can still read them." + RESET)
   console.log(DIM + "  Hooks handle hiding at the LLM prompt level, no file rename needed." + RESET)
   console.log()
+  console.log("  download-model  Download the optional local multilingual embedding model")
+  console.log()
   console.log(BOLD + "Scope" + RESET + DIM + "  (override default: both scopes)" + RESET)
   console.log()
   console.log(flag("--local", "Target current project only"))

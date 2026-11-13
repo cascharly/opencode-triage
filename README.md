@@ -244,3 +244,9 @@ MIT
 ### Search and load tools
 
 `triage` searches installed skills without loading their instructions. Use native `skill({ name })` to load a result, or `load-skill({ name })` for results marked file-hidden. `list-skills` lists the installed catalog on demand. The fallback loader supports legacy `SKILL.md.disabled` files.
+
+### Optional multilingual semantic matching
+
+Run `npx opencode-triage download-model` once to download the local multilingual embedding model, then restart OpenCode. The plugin uses only cached model files and never downloads a model during a chat. If optional dependencies, the model, or inference are unavailable, routing falls back to keyword matching. Set the plugin option `semanticMatching: false` to use keyword matching explicitly. Skill discovery retains automatic cache invalidation; `rescan` also refreshes it on demand.
+
+The model cache is `~/.cache/opencode-triage/models/`. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`.

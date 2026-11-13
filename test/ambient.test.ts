@@ -16,7 +16,7 @@ it("isolates concurrent sessions, refreshes every request, and avoids duplicate 
       writeFileSync(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} specialized workflow\n---\n`)
     }
     plugin = await server({ worktree: root, client: { tui: { showToast: async () => {} } } } as any,
-      { autoHide: true, ambientMaxCandidates: 1 })
+      { autoHide: true, ambientMaxCandidates: 1, semanticMatching: false })
     const transform = plugin["experimental.chat.messages.transform"]!
     const request = (sessionID: string, text: string): any => ({ messages: [{
       info: { id: `msg_${sessionID}`, role: "user", sessionID },
