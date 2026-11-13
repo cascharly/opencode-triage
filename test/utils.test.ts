@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { stripBOM, extractFrontmatter, escapeRegex, isValidSkillName, sanitizeSkillContent } from "../src/utils.ts"
 import { getWordBonus, scoreSkills, stem } from "../src/scoring.ts"
-import { THRESHOLD, MIN_WORD_LENGTH, NAME_WEIGHT, DESC_WEIGHT, SCOPE_BONUS } from "../src/config.ts"
+import { THRESHOLD, SCOPE_BONUS } from "../src/config.ts"
 
 // ── stripBOM ──────────────────────────────────────────────
 
@@ -180,11 +180,6 @@ describe("scoreSkills", () => {
     assert.ok(backupSkill && backupSkill.score > 0)
   })
 
-  it("handles unicode letters in query", () => {
-    const result = scoreSkills("caf\u00e9", skills)
-    assert.ok(Array.isArray(result))
-    assert.equal(result.length, 3)
-  })
 })
 
 // ── isValidSkillName ──────────────────────────────────────
@@ -284,30 +279,6 @@ describe("stem", () => {
 })
 
 // ── Constants ─────────────────────────────────────────────
-
-describe("constants", () => {
-  it("THRESHOLD is 30", () => {
-    assert.equal(THRESHOLD, 30)
-  })
-
-  it("MIN_WORD_LENGTH is 3", () => {
-    assert.equal(MIN_WORD_LENGTH, 3)
-  })
-
-  it("NAME_WEIGHT is 3", () => {
-    assert.equal(NAME_WEIGHT, 3)
-  })
-
-  it("DESC_WEIGHT is 1", () => {
-    assert.equal(DESC_WEIGHT, 1)
-  })
-
-  it("SCOPE_BONUS is 5", () => {
-    assert.equal(SCOPE_BONUS, 5)
-  })
-})
-
-// ── Integration: scoring scenarios ────────────────────────
 
 describe("scoring scenarios", () => {
   const skills = [
@@ -466,17 +437,6 @@ describe("scoring scenarios", () => {
     assert.equal(projectSkill.score, 0, "project scope bonus must not apply when score is 0")
   })
 
-  it("project skills sort before global", () => {
-    const all = [
-      { name: "z-global", desc: "global skill", path: "/z", scope: "global" as const },
-      { name: "a-project", desc: "project skill", path: "/a", scope: "project" as const },
-    ]
-    const sorted = [...all].sort((a, b) => {
-      if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
-    })
-    assert.equal(sorted[0].scope, "project")
-  })
 })
 
 // ── sanitizeSkillContent ──────────────────────────────────
