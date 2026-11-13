@@ -1,7 +1,6 @@
 /*
  * opencode-triage — Skill Router Plugin
  * ======================================
- * Version: 1.3.0
  * License: MIT
  *
  * Deterministic skill routing for OpenCode. Registers a `triage()` custom tool
@@ -18,7 +17,7 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
-import { tool } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin/tool"
 import { join } from "node:path"
 import { watch } from "node:fs"
 import { createRequire } from "node:module"

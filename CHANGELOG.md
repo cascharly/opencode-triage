@@ -5,6 +5,33 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-13
+
+### Added
+
+- Automatic per-message skill suggestions, limited to relevant candidates and isolated between sessions.
+- Chinese word segmentation for unspaced queries, while preserving existing English keyword scoring.
+- Optional local multilingual embeddings: discover English skills using Spanish or Chinese queries. Download the model explicitly with `download-model`; chats use cached files only and fall back to keyword matching if dependencies or inference are unavailable.
+- `list-skills`, `load-skill`, and `rescan` plugin tools for catalog browsing, legacy disabled-file loading, and explicit cache refresh.
+- File-level and prompt-level visibility counts in `status --json`, plus redacted Windows dual-config diagnostics.
+
+### Changed
+
+- `triage` returns scored candidates without loading instructions. Native `skill` loads active files; `load-skill` supports legacy `.disabled` files.
+- Use the maintained `@huggingface/transformers` runtime for optional embeddings, replacing the legacy Xenova package. Dependency files are never rewritten.
+- Keep filesystem watchers and TTL cache invalidation alongside semantic matching.
+- Update development dependencies and validate against OpenCode plugin API 1.19.5.
+- Remove duplicated and constant-only tests while retaining scoring and sanitization behavior coverage.
+
+### Fixed
+
+- Prevent suggestion context from leaking across sessions or becoming stale between model requests.
+- Preserve loading of legacy file-hidden skills after separating discovery from loading.
+- Keep JSON stdout free of update notices. Duplicate inspection supports `dedupe --dry-run --json`; ambiguous JSON removal returns an explicit error.
+- Normalize config hashes regardless of object key order, and report empty skill scopes without claiming effective hiding.
+- Align model download and runtime cache locations; handle concurrent model initialization and invalid embedding vectors safely.
+- Refresh CLI help, installation messages, package metadata, and contributor documentation.
+
 ## [1.3.4] — 2026-05-20
 
 ### Added

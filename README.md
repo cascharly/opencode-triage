@@ -1,6 +1,6 @@
 # opencode-triage
 
-> OpenCode already lazy-loads full skill bodies — but it still injects every skill's name and description (from `SKILL.md` frontmatter) into the prompt on every message. With a growing skill library and verbose descriptions, that can mean hundreds of tokens burned before you type a word. opencode-triage eliminates that XML list entirely, replacing it with a compact tool definition and routing on-demand via keyword matching.
+> OpenCode lists every installed skill in the prompt. Triage hides that full catalog, suggests relevant skills for the current message, and lets the model load only the instructions it needs. Matching uses keywords or optional local multilingual embeddings.
 
 ## Quick Start
 
@@ -8,7 +8,7 @@
 npm install -g opencode-triage
 ```
 
-Restart OpenCode, then type `/triage on`. That's it.
+Restart OpenCode, then type `/triage on`. For multilingual matching, optionally run `npx opencode-triage download-model` and restart again.
 
 ## What It Does
 
@@ -18,10 +18,10 @@ Triage hides all skills from the prompt. When you need one, the LLM calls `triag
 
 ```
 No triage:   [name+desc of A] [name+desc of B] [name+desc of C] ...  ← every message
-With triage: triage({ query }) → keyword match → loads one skill body when needed
+With triage: relevant suggestions or triage({ query }) -> skill({ name }) loads chosen instructions
 ```
 
-**The more skills you install, the more triage saves.** Each new skill adds tokens to the native prompt, but zero tokens when triage is on.
+Prompt savings depend on the catalog size, tool definitions, and suggested candidates. Use `/triage compare` for a catalog estimate; per-message suggestions add a small variable cost.
 
 ## LLM Quick-Install
 
@@ -43,7 +43,8 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 | `/triage off` | Disable hooks, restore skills to the LLM prompt (global + local) |
 | `/triage status` | See hook state and skill visibility |
 | `/triage dedupe` | Remove project-level duplicates of global skills |
-| `/triage compare` | Token savings estimate for your skills |
+| `/triage compare` | Catalog token savings estimate (excludes variable suggestions) |
+| `/triage download-model` | Download the optional multilingual model once, then restart OpenCode |
 
 > **Note:** Skills are hidden via hooks at the LLM prompt level — `SKILL.md` files stay intact on disk, so other AI tools (Cursor, Claude Code, Windsurf) still see them. File renaming (`SKILL.md` ↔ `SKILL.md.disabled`) is only used as a fallback for older OpenCode versions without hook support. When files are renamed to `.disabled`, they will also be hidden from other AI tools that scan the same directories.
 
@@ -51,7 +52,7 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 
 | Flag | Where | What it does |
 |------|-------|--------------|
-| `--json` | All commands | Machine-readable JSON output |
+| `--json` | status, compare, version, help, download-model, dedupe preview | Machine-readable JSON output |
 | `--quiet` | on/off | Suppress non-error output |
 | `--dry-run` | dedupe | Preview changes without renaming |
 | `--all` | status | Show full skill list without truncation |
@@ -69,12 +70,12 @@ For automation, call `npx opencode-triage <command> --json` directly and ensure 
 | Triage globally only | hidden | exposed | `/triage on --global` |
 | Triage in project only | exposed | hidden | `/triage on --local` |
 
-Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`.
+Global affects `~/.config/opencode/skills/`, `~/.claude/skills/`, `~/.agents/skills/`, and `~/.gemini/config/skills/`.
 Local affects `.opencode/skills/`, `.claude/skills/`, `.agent/skills/`, `.agents/skills/` in the current project.
 
 ## How It Works
 
-The LLM calls `triage()` when it encounters a task it can't handle with general knowledge. The plugin scores all hidden skills against the query and returns the best match.
+Triage suggests up to three relevant skills for each user message. The LLM can also call `triage()` to search explicitly, then load a chosen skill with `skill({ name })` or the legacy `load-skill` fallback.
 
 ```
 User: "backup my database"
@@ -86,10 +87,10 @@ LLM: triage({ query: "backup my database" })
 Plugin: scans filesystem → scores skills → returns best match
   backup-restore     score=60  (matched: backup, database)
   database-sync      score=25  (matched: database)
-  gap=35 ≥ threshold(30) → HIGH CONFIDENCE
+  Returns a scored shortlist; the model chooses which skill to load.
 ```
 
-No LLM reasoning overhead. No extra API calls. Just fast deterministic matching.
+Matching requires no extra LLM API calls. Optional semantic matching runs a cached model locally; keyword matching is used when the model is unavailable.
 
 ### Spell Correction
 
@@ -181,7 +182,7 @@ For per-project installs, remove `"opencode-triage"` from `.opencode/opencode.js
 
 ### How Hiding Skills Works
 
-Skills live in up to seven directories:
+Skills are discovered from project and global skill directories:
 
 | Path | Scope |
 |------|-------|
@@ -192,6 +193,7 @@ Skills live in up to seven directories:
 | `~/.config/opencode/skills/<name>/` | Global |
 | `~/.claude/skills/<name>/` | Global |
 | `~/.agents/skills/<name>/` | Global |
+| `~/.gemini/config/skills/<name>/` | Global |
 
 When triage is ON, hooks hide the full skill catalog while keeping loading available:
 
@@ -237,7 +239,7 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 
 ## Compatibility
 
-- OpenCode 1.14+
+- OpenCode 1.14+ plugin API; validated with 1.19.5
 - Bun runtime (bundled with OpenCode)
 - Node.js 18+ (for CLI script)
 
@@ -255,6 +257,6 @@ Automatic suggestions use only the current user message and expose at most three
 
 Run `npx opencode-triage download-model` once to download the local multilingual embedding model, then restart OpenCode. The plugin uses only cached model files and never downloads a model during a chat. If optional dependencies, the model, or inference are unavailable, routing falls back to keyword matching. Set the plugin option `semanticMatching: false` to use keyword matching explicitly. Skill discovery retains automatic cache invalidation; `rescan` also refreshes it on demand.
 
-The model cache is `~/.cache/opencode-triage/models/`. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`.
+The model cache is `~/.cache/opencode-triage/models/`. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`. The optional model runtime is `@huggingface/transformers`; a modern Node.js runtime (22+ recommended) is needed for model downloads. Basic CLI commands retain Node.js 18+ support.
 
 `dedupe --json` requires `--dry-run` when duplicates exist; omit `--json` to choose interactively which copy to remove.

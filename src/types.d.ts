@@ -1,4 +1,4 @@
-declare module "@xenova/transformers" {
+declare module "@huggingface/transformers" {
   export function pipeline(
     task: "feature-extraction",
     model: string,

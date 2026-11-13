@@ -1,56 +1,43 @@
-# opencode-triage — Agent Guide
+# opencode-triage - Agent Guide
 
-## What this is
-
-Deterministic skill router for OpenCode. Published as `opencode-triage` on npm.
+Skill discovery and routing plugin for OpenCode, published as `opencode-triage` on npm.
 
 ## Entrypoints
 
-- **Plugin** (`src/index.ts`) — exports `server`, consumed by OpenCode Bun runtime. No build step.
-- **CLI** (`bin/opencode-triage.cjs`) — standalone Node.js script for user commands.
-- **Postinstall** (`postinstall.cjs`) — auto-creates `/triage` command file on npm install.
+- `src/index.ts`: Bun plugin export `server`, with no compilation step.
+- `bin/opencode-triage.cjs`: Node CLI; commands live in `bin/commands/`.
+- `postinstall.cjs`: creates the `/triage` command for local or global installs.
 
-## Commands
+## Validation
 
-```sh
-npm run check    # tsc --noEmit (only check, no build/compile)
-```
-
-No test runner, no linter, no formatter config. No tsconfig.json in repo.
+- `npm run check`: TypeScript type checking.
+- `npm test`: Node test runner with TypeScript stripping (Node 22+ for development).
+- `TRIAGE_TEST_SEMANTIC_MODEL=1 npm test`: optional cached-model integration test.
+- `TRIAGE_TEST_MISSING_EMBEDDINGS=1 npm test`: optional fallback test, run with the embedding dependency absent.
+- No linter or formatter is configured.
 
 ## Architecture
 
-- Scans 8 directories: `.agent/skills/`, `.agents/skills/`, `.claude/skills/`, `.opencode/skills/` (project) + `~/.agents/skills/`, `~/.claude/skills/`, `~/.config/opencode/skills/`, `~/.gemini/config/skills/` (global)
-- Pure Bun plugin architecture — operates entirely dynamically using system prompt and tool transformation hooks; does not require or load any standalone fallback router skill.
-- Reads `SKILL.md` files directly — `.disabled` suffix is fallback for older OpenCode
-- Hides skills from LLM via 3-layer hook defense: `tool.definition` (modifies `skill` tool description) → `experimental.chat.system.transform` (strips `<available_skills>` from system prompt) → `tool.execute.before` (intercepts stray calls)
-- CLI file rename (`SKILL.md` ↔ `SKILL.md.disabled`) remains as fallback when hooks unsupported
-- Upgrade from older versions: plugin detects `.disabled` files left from old file-rename mode, auto-restores them to `SKILL.md` on first chat message
-- Keyword scoring: `THRESHOLD=30`, `MIN_WORD_LENGTH=3`, `NAME_WEIGHT=3`, `DESC_WEIGHT=1`, `BIGRAM_BONUS=10`, `PHRASE_BONUS=50`, `POSITION_DECAY=0.9`, `SCOPE_BONUS=5`
-- Stemming: `stem()` strips `ies→y` and `ing→""` (MIN stem length 4) — bridges morphological variants in desc matching
-- Name tokenization: hyphens/underscores replaced with spaces for bigram/phrase matching in skill names
-- "triage" directory is always excluded
-- Frontmatter keys parsed: `name` (falls back to directory name), `description` (supports folded `>` syntax)
+- Shared skill directories: `bin/skill-dirs.cjs` resolves four project and four global paths.
+- Hooks hide the full native catalog. Request-specific suggestions expose at most three candidates by default, without sharing state between sessions.
+- `triage` searches metadata; native `skill` loads active instructions; `load-skill` supports legacy `SKILL.md.disabled` files. `list-skills` lists the catalog and `rescan` refreshes discovery.
+- Filesystem watchers plus a five-second TTL invalidate discovery; watchers close on plugin disposal.
+- English keyword scoring retains minimum word length 3, position decay, IDF, stemming, name/description weights, and scope bonuses. Chinese queries use `jieba-wasm` segmentation.
+- Optional `@huggingface/transformers` embeddings enable multilingual matching. Model download is explicit, chats use local cached model files, and failures fall back to keywords. Never rewrite installed dependencies.
+- Model and embedding caches live under `~/.cache/opencode-triage/`.
+- The `triage` skill is always excluded; environment exclusions can only add names.
 
-## CLI behavior
+## CLI
 
-- Default scope is **global**. Use `--local` flag for project-level, `--both` for both.
-- `/triage on` — hides global skills
-- `/triage on --local` — hides project skills
-- `/triage on --both` — hides skills in both global and local scopes
-- `/triage off` — exposes global skills
-- `/triage off --local` — exposes project skills
-- `/triage off --both` — exposes skills in both global and local scopes
-- `/triage status` — shows plugin state + all skills (project + global)
-- Each scope is independent — 4 possible combinations (or use `--both` for atomic toggle)
-- Always requires restart after toggle
-
-## Postinstall
-
-- Detects global vs local via `npm_config_global` env var
-- Auto-creates command file: `~/.config/opencode/commands/triage.md` (global) or `.opencode/commands/triage.md` (local)
-- Command template uses `npx -y opencode-triage $ARGUMENTS`
+- `on` and `off` target both global and local scopes by default; `--global`, `--local`, and `--both` override scope.
+- Restart OpenCode after toggles or downloading the model.
+- `status --json` distinguishes file visibility from effective prompt visibility and includes redacted Windows config diagnostics when both config locations exist.
+- `dedupe --dry-run --json` previews duplicates; removal requires interactive selection.
+- `download-model` downloads the optional local model; it does not run during a chat.
 
 ## Publishing
 
-`npm publish` — files included via `"files": ["src/", "bin/", "postinstall.cjs", "README.md"]` in package.json. `.npmignore` excludes `*.tgz`, `.eslintrc*`, `tsconfig.json`.
+- Bump `package.json` and `package-lock.json`, update `CHANGELOG.md` and release documentation.
+- `prepublishOnly` runs type checking and tests.
+- Check `npm pack --dry-run --json` before publishing; publish only source, CLI modules, postinstall, README, and changelog. Never include local configs, credentials, skills, caches, or models.
+- Publish with `npm publish`, create the matching Git tag and GitHub release, and verify npm metadata and the installed CLI version.

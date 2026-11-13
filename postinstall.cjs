@@ -23,8 +23,8 @@ if (isGlobal) {
   console.log()
   console.log("  1. Restart OpenCode")
   console.log("  2. Type /triage on to activate")
-  console.log("  3. Will rename SKILL.md in:")
-  console.log("     ~/.config/opencode/skills/  ~/.claude/skills/  ~/.agent/skills/")
+  console.log("  3. Hooks hide the skill catalog; SKILL.md files stay intact.")
+  console.log("     Optional multilingual matching: npx opencode-triage download-model")
   console.log()
 } else {
   const projectRoot = process.env.INIT_CWD || process.cwd()
@@ -38,7 +38,7 @@ if (isGlobal) {
   console.log()
   console.log("  1. Restart OpenCode")
   console.log("  2. Type /triage on --local to activate")
-  console.log("  3. Will rename SKILL.md in:")
-  console.log("     .opencode/skills/  .claude/skills/  .agent/skills/")
+  console.log("  3. Hooks hide the skill catalog; SKILL.md files stay intact.")
+  console.log("     Optional multilingual matching: npx opencode-triage download-model")
   console.log()
 }

@@ -364,9 +364,9 @@ async function downloadModel() {
   if (!isQuiet && !isJson) console.log("This may take 30-60s on first run (~118MB). Subsequent starts are instant.\n")
 
   try {
-    const { pipeline } = await import("@xenova/transformers")
+    const { pipeline } = await import("@huggingface/transformers")
     if (!isQuiet && !isJson) console.log("Loading model...")
-    const model = await pipeline("feature-extraction", MODEL, { cache_dir: path.join(HOMEDIR, ".cache", "opencode-triage", "models") })
+    const model = await pipeline("feature-extraction", MODEL, { cache_dir: path.join(HOMEDIR, ".cache", "opencode-triage", "models"), dtype: "q8" })
     if (!isQuiet && !isJson) console.log("Warming up...")
     const out = await model("test", { pooling: "mean", normalize: true })
     if (!isQuiet && !isJson) console.log(`OK — embedding dimension: ${out.data.length}`)
@@ -390,7 +390,7 @@ async function downloadModel() {
       console.error("Possible causes:")
       console.error("  1. Network/proxy blocks HuggingFace CDN (cdn-lfs.hf.co)")
       console.error("  2. Corporate firewall blocks .onnx file downloads")
-      console.error("  3. Missing dependencies — run: npm install @xenova/transformers")
+      console.error("  3. Missing dependencies — run: npm install @huggingface/transformers")
       console.error()
       if (msg.includes("fetch failed")) {
         console.error("Manual download workaround:")
@@ -411,12 +411,12 @@ function showHelp() {
   if (isJson) {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
-      commands: ["on", "off", "status", "dedupe", "compare", "version", "help"],
-      flags: ["--local", "--global", "--both", "--json", "--quiet", "--all"],
+      commands: ["on", "off", "mode", "status", "dedupe", "compare", "download-model", "version", "help"],
+      flags: ["--local", "--global", "--both", "--json", "--quiet", "--all", "--dry-run"],
     }, null, 2))
     return
   }
-  const cmdCol = 10
+  const cmdCol = 16
   const flagCol = 12
   const cmd = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(cmdCol - name.length) + desc
   const flag = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(flagCol - name.length) + desc
@@ -434,7 +434,7 @@ function showHelp() {
   console.log(DIM + "  SKILL.md files stay intact — other AI tools can still read them." + RESET)
   console.log(DIM + "  Hooks handle hiding at the LLM prompt level, no file rename needed." + RESET)
   console.log()
-  console.log("  download-model  Download the optional local multilingual embedding model")
+  console.log(cmd("download-model", "Download the optional local multilingual embedding model"))
   console.log()
   console.log(BOLD + "Scope" + RESET + DIM + "  (override default: both scopes)" + RESET)
   console.log()

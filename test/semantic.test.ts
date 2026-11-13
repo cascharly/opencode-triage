@@ -7,7 +7,7 @@ import { createRequire } from "node:module"
 import { scoreSkillsSemantic } from "../src/scoring.ts"
 import { SCOPE_BONUS } from "../src/config.ts"
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 import { tmpdir } from "node:os"
 import { server } from "../src/index.ts"
 
@@ -42,8 +42,9 @@ it("rejects incompatible or corrupt embedding vectors", () => {
 it("matches Spanish queries to English skills without modifying sharp", {
   skip: process.env.TRIAGE_TEST_SEMANTIC_MODEL !== "1",
 }, async () => {
-  const require = createRequire(import.meta.url)
-  const sharpFiles = [require.resolve("sharp/package.json"), require.resolve("sharp")]
+  const require = createRequire(import.meta.resolve("@huggingface/transformers"))
+  const sharpEntry = require.resolve("sharp")
+  const sharpFiles = [join(dirname(sharpEntry), "..", "package.json"), sharpEntry]
   const hashes = () => sharpFiles.map(file => createHash("sha256").update(readFileSync(file)).digest("hex"))
   const before = hashes()
   const model = await loadModel()
@@ -58,6 +59,7 @@ it("matches Spanish queries to English skills without modifying sharp", {
   for (const [query, expected] of [
     ["Necesito hacer una copia de seguridad de mi base de datos", "backup-restore"],
     ["Quiero mejorar el diseno visual de mi sitio web", "web-design"],
+    ["\u5907\u4efd\u6570\u636e\u5e93", "backup-restore"],
   ]) {
     const ranked = scoreSkillsSemantic(await embed(model, query), skills, vectors).sort((a, b) => b.score - a.score)
     assert.equal(ranked[0].name, expected)

@@ -4,7 +4,7 @@
  * Loads a multilingual transformer model, computes text embeddings,
  * and manages a persistent on-disk cache keyed by skill file path + mtime.
  *
- * If @xenova/transformers or onnxruntime-node are not installed (or fail
+ * If @huggingface/transformers or onnxruntime-node are not installed (or fail
  * to load due to network/hardware limitations), this module gracefully
  * returns null from loadModel() — the caller should fall back to keyword
  * scoring via scoreSkills().
@@ -30,8 +30,8 @@ let _modelPromise: Promise<any | null> | null = null
 let _loadError: string | null = null
 
 async function loadModelRaw(localOnly: boolean): Promise<any> {
-  const { pipeline } = await import("@xenova/transformers")
-  const opts: Record<string, unknown> = { cache_dir: join(CACHE_DIR, "models") }
+  const { pipeline } = await import("@huggingface/transformers")
+  const opts: Record<string, unknown> = { cache_dir: join(CACHE_DIR, "models"), dtype: "q8" }
   if (localOnly) opts.local_files_only = true
   return pipeline("feature-extraction", EMBEDDING_MODEL, opts)
 }
