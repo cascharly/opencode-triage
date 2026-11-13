@@ -3,48 +3,11 @@
  */
 import assert from "node:assert"
 import { describe, it } from "node:test"
+import { createRequire } from "node:module"
 
-// Re-implement stripJsoncComments here to test the logic
-function stripJsoncComments(text: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (escape) {
-      result += ch
-      escape = false
-      i++
-      continue
-    }
-    if (ch === "\\" && inString) {
-      result += ch
-      escape = true
-      i++
-      continue
-    }
-    if (ch === '"') {
-      inString = !inString
-      result += ch
-      i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "*") {
-      i += 2
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
-      i += 2
-      continue
-    }
-    result += ch
-    i++
-  }
-  return result
-}
+const require = createRequire(import.meta.url)
+const shared = require("../bin/shared.cjs")
+import { stripJsoncComments } from "../src/config.ts"
 
 describe("stripJsoncComments", () => {
   it("strips single-line comments", () => {
@@ -99,3 +62,39 @@ describe("stripJsoncComments", () => {
     assert.strictEqual(stripJsoncComments(input), input)
   })
 })
+
+describe("shared.cjs utilities", () => {
+  // stripJsoncComments is defined in bin/shared.cjs and re-exported by src/config.ts.
+  // The TypeScript layer imports from shared.cjs via createRequire — single source of truth.
+  it("exports stripJsoncComments", () => {
+    const input = `{\n  "key": "value", // this is a comment\n  "other": 1\n}`
+    const expected = `{\n  "key": "value", \n  "other": 1\n}`
+    assert.strictEqual(shared.stripJsoncComments(input), expected)
+  })
+
+  it("exports levenshtein that calculates distance correctly", () => {
+    assert.strictEqual(shared.levenshtein("cat", "cat"), 0)
+    assert.strictEqual(shared.levenshtein("cat", "bat"), 1)
+    assert.strictEqual(shared.levenshtein("kitten", "sitting"), 3)
+  })
+
+  it("exports semverGt that compares semver correctly", () => {
+    assert.strictEqual(shared.semverGt("1.2.3", "1.2.2"), true)
+    assert.strictEqual(shared.semverGt("1.2.3", "1.2.3"), false)
+    assert.strictEqual(shared.semverGt("1.3.0", "1.2.9"), true)
+    assert.strictEqual(shared.semverGt("2.0.0", "1.9.9"), true)
+    assert.strictEqual(shared.semverGt("1.10.0", "1.9.0"), true)
+  })
+
+  it("exports extractFrontmatterField that parses field correctly", () => {
+    const content = `---
+name: backup-restore
+description: Backup and restore databases
+---
+Body text`
+    assert.strictEqual(shared.extractFrontmatterField(content, "name"), "backup-restore")
+    assert.strictEqual(shared.extractFrontmatterField(content, "description"), "Backup and restore databases")
+    assert.strictEqual(shared.extractFrontmatterField(content, "missing"), null)
+  })
+})
+
