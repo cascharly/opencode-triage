@@ -244,3 +244,4 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 ## License
 
 MIT
+`dedupe --json` requires `--dry-run` when duplicates exist; omit `--json` to choose interactively which copy to remove.

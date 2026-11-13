@@ -171,7 +171,7 @@ describe("status --json effective state", () => {
     })
   })
 
-  it("reports Windows config drift without exposing config values", () => {
+  it("reports Windows config drift without exposing config values", { skip: process.platform !== "win32" }, () => {
     withFixture(fixture => {
       const userConfigDir = path.join(fixture.home, ".config", "opencode")
       const appDataConfigDir = path.join(fixture.appData, "opencode")
