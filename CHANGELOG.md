@@ -5,6 +5,19 @@ All notable changes to opencode-triage are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Automatic OpenCode V2 support through the native `./server` package entrypoint, while preserving the original callable V1 root entrypoint for older loaders.
+- V2 tool registration, native skill IDs, request-scoped suggestions, catalog hiding, permission checks, cancellation, and cleanup using the shared router.
+- Installed-package compatibility checks under Bun with V1 SDKs 1.14.17 and 1.19.5 and the official V2 SDK 2.3.0 resolver.
+
+### Fixed
+
+- Read and update both V1 `plugin` tuples and V2 `plugins` objects without dropping other options, package version pins, or unrelated registrations.
+- Detect project-root config files in CLI and plugin configuration reads, and refuse to overwrite malformed configs.
+
 ## [1.4.0] - 2026-11-13
 
 ### Added

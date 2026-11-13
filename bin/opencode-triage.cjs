@@ -28,6 +28,7 @@ const {
   semverGt
 } = require("./shared.cjs")
 const helpers = require("./helpers.cjs")
+const { setTriageState } = require("./plugin-config.cjs")
 const showStatus = require("./commands/status.cjs")
 const showCompare = require("./commands/compare.cjs")
 const dedupeSkills = require("./commands/dedupe.cjs")
@@ -53,13 +54,12 @@ description: Toggle, inspect, and benchmark the triage skill router
 Run npx -y opencode-triage $ARGUMENTS and show the output verbatim.
 If output contains "Restart opencode", tell the user to restart.
 `
-const LOCAL_CFG_PATH = (() => {
-  const jsonPath = path.join(WORKTREE, ".opencode", "opencode.json")
-  const jsoncPath = path.join(WORKTREE, ".opencode", "opencode.jsonc")
-  if (fs.existsSync(jsonPath)) return jsonPath
-  if (fs.existsSync(jsoncPath)) return jsoncPath
-  return jsonPath
-})()
+const LOCAL_CFG_PATH = [
+  path.join(WORKTREE, ".opencode", "opencode.json"),
+  path.join(WORKTREE, ".opencode", "opencode.jsonc"),
+  path.join(WORKTREE, "opencode.json"),
+  path.join(WORKTREE, "opencode.jsonc"),
+].find(file => fs.existsSync(file)) || path.join(WORKTREE, ".opencode", "opencode.json")
 const LOCAL_CMD_DIR   = path.join(WORKTREE, ".opencode", "commands")
 const LOCAL_CMD_FILE  = path.join(LOCAL_CMD_DIR, "triage.md")
 const GLOBAL_CFG_PATH = (() => {
@@ -184,31 +184,18 @@ function toggle(enable, scope) {
 // Does NOT add or remove the plugin — only sets the autoHide flag.
 // Creates the config if enabling and it doesn't exist yet.
 function writeTriageState(configPath, enable) {
-  let config = {}
-  let exists = false
+  let config
   try {
-    const raw = fs.readFileSync(configPath, "utf-8")
-    config = JSON.parse(stripJsoncComments(raw))
-    exists = true
-  } catch {}
-
-  // If config doesn't exist and we're disabling, nothing to persist
-  if (!exists && !enable) return
-  if (!exists) config = { "$schema": "https://opencode.ai/config.json" }
-
-  config.plugin = config.plugin || []
-  const idx = helpers.findTriageIndex(config.plugin)
-
-  // If plugin not registered and we're disabling, nothing to persist
-  if (idx < 0 && !enable) return
-
-  const entry = [helpers.PLUGIN_NAME, { autoHide: enable }]
-  if (idx >= 0) config.plugin[idx] = entry
-  else config.plugin.push(entry)
-
+    config = JSON.parse(stripJsoncComments(fs.readFileSync(configPath, "utf-8")))
+  } catch (error) {
+    if (error.code !== "ENOENT") throw new Error(`Cannot read valid config: ${configPath}`)
+    if (!enable) return
+    config = { "$schema": "https://opencode.ai/config.json" }
+  }
+  if (!setTriageState(config, enable)) return
   fs.mkdirSync(path.dirname(configPath), { recursive: true })
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8")
-  if (!isQuiet) console.log(`Config:    autoHide=${enable} → ${configPath}`)
+  if (!isQuiet) console.log(`Config: autoHide=${enable} -> ${configPath}`)
 }
 
 function updateLocalConfig(enable) {
@@ -275,23 +262,10 @@ function updateGlobalConfig(enable) {
 }
 
 function updatePluginConfigMode(configPath, mode) {
-  let raw
-  try {
-    raw = fs.readFileSync(configPath, "utf-8")
-  } catch { return false }
-
-  const config = JSON.parse(stripJsoncComments(raw))
-  config.plugin = config.plugin || []
-  const idx = helpers.findTriageIndex(config.plugin)
-
-  if (mode === "auto") {
-    if (idx >= 0 && Array.isArray(config.plugin[idx]) && config.plugin[idx][1]?.autoHide === true) return false
-    helpers.setPluginMode(config.plugin, "auto")
-  } else {
-    if (idx >= 0 && config.plugin[idx] === helpers.PLUGIN_NAME) return false
-    helpers.setPluginMode(config.plugin, "manual")
-  }
-
+  let config
+  try { config = JSON.parse(stripJsoncComments(fs.readFileSync(configPath, "utf-8"))) }
+  catch (error) { if (error.code === "ENOENT") return false; throw error }
+  if (!setTriageState(config, mode === "auto")) return false
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8")
   return true
 }

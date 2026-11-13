@@ -2,7 +2,7 @@ const fs = require("fs")
 const path = require("path")
 const crypto = require("crypto")
 const { stripJsoncComments } = require("./shared.cjs")
-const { isTriageEntry } = require("./helpers.cjs")
+const { readTriageOptions } = require("./plugin-config.cjs")
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -33,7 +33,7 @@ function readConfigForDiagnostics(configPath) {
       path: configPath,
       exists: true,
       error: null,
-      pluginPresent: Array.isArray(config.plugin) && config.plugin.some(isTriageEntry),
+      pluginPresent: readTriageOptions(config) !== null,
       sectionKeys: Object.keys(config).sort(),
       sectionHashes: Object.fromEntries(
         Object.keys(config).sort().map(key => [

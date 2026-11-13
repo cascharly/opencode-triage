@@ -7,6 +7,8 @@ const fs = require("fs")
 const path = require("path")
 const { stripJsoncComments, levenshtein, extractFrontmatterField } = require("./shared.cjs")
 
+const { isTriageEntry, readTriageOptions } = require("./plugin-config.cjs")
+
 const PLUGIN_NAME = "opencode-triage"
 
 function findProjectRoot(startDir) {
@@ -57,10 +59,6 @@ function suggestCommand(input) {
     if (d < bestDist) { bestDist = d; best = cmd }
   }
   return bestDist <= 3 ? best : null
-}
-
-function isTriageEntry(entry) {
-  return entry === PLUGIN_NAME || (Array.isArray(entry) && entry[0] === PLUGIN_NAME)
 }
 
 function findTriageIndex(plugin) {
@@ -118,13 +116,8 @@ function collectConfigState(LOCAL_CFG_PATH, GLOBAL_CFG_PATH) {
   function readMode(path) {
     try {
       const raw = fs.readFileSync(path, "utf-8")
-      const plugin = JSON.parse(stripJsoncComments(raw)).plugin || []
-      const idx = findTriageIndex(plugin)
-      if (idx < 0) return { active: false, mode: "manual" }
-      return {
-        active: true,
-        mode: Array.isArray(plugin[idx]) && plugin[idx][1]?.autoHide === true ? "auto" : "manual",
-      }
+      const options = readTriageOptions(JSON.parse(stripJsoncComments(raw)))
+      return { active: options !== null, mode: options?.autoHide === true ? "auto" : "manual" }
     } catch { return { active: false, mode: "manual" } }
   }
 
