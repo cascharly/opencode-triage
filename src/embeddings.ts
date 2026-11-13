@@ -13,46 +13,25 @@
  * Format: { "<abs-path>": { "mtime": 1718963200000, "embedding": [0.12, ...] } }
  */
 
-import { join, dirname } from "node:path"
+import { join } from "node:path"
 import { homedir } from "node:os"
-import { mkdirSync, writeFileSync } from "node:fs"
 import { readFile, writeFile, stat, mkdir } from "node:fs/promises"
-import { fileURLToPath } from "node:url"
 import type { SkillEntry } from "./config.ts"
 import { EMBEDDING_MODEL } from "./config.ts"
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const __nodeModules = join(__dirname, "..", "node_modules")
 
 const CACHE_DIR = join(homedir(), ".cache", "opencode-triage")
 const CACHE_FILE = join(CACHE_DIR, "embeddings.json")
 
-type EmbedCacheEntry = { mtime: number; embedding: number[] }
+type EmbedCacheEntry = { mtime: number; model: string; text: string; embedding: number[] }
 type EmbedDiskCache = Map<string, EmbedCacheEntry>
 
 let _model: any | null = null
-let _loadAttempted = false
+let _modelPromise: Promise<any | null> | null = null
 let _loadError: string | null = null
 
-function stubBrokenSharp() {
-  const sharpDir = join(__nodeModules, "sharp")
-  const sharpLib = join(sharpDir, "lib")
-  const pkgPath = join(sharpDir, "package.json")
-  const constructorPath = join(sharpLib, "constructor.js")
-  const indexPath = join(sharpDir, "index.js")
-
-  try { mkdirSync(sharpLib, { recursive: true }) } catch {}
-  try {
-    writeFileSync(pkgPath, JSON.stringify({ name: "sharp", version: "0.0.0", main: "lib/constructor.js" }))
-    writeFileSync(constructorPath, "module.exports = function() { throw new Error('sharp: image processing unavailable') }")
-    writeFileSync(indexPath, "module.exports = require('./lib/constructor')")
-  } catch {}
-}
-
 async function loadModelRaw(localOnly: boolean): Promise<any> {
-  stubBrokenSharp()
   const { pipeline } = await import("@xenova/transformers")
-  const opts: Record<string, unknown> = {}
+  const opts: Record<string, unknown> = { cache_dir: join(CACHE_DIR, "models") }
   if (localOnly) opts.local_files_only = true
   return pipeline("feature-extraction", EMBEDDING_MODEL, opts)
 }
@@ -63,17 +42,13 @@ async function loadModelRaw(localOnly: boolean): Promise<any> {
  */
 export async function loadModel(): Promise<any | null> {
   if (_model) return _model
-  if (_loadAttempted) return null
-  _loadAttempted = true
-
-  try {
-    _model = await loadModelRaw(true)
-    return _model
-  } catch (e) {
-    _loadError = (e as Error).message ?? String(e)
-    console.error("[opencode-triage] Embedding model unavailable:", _loadError)
-    return null
+  if (!_modelPromise) {
+    _modelPromise = loadModelRaw(true).then(model => { _model = model; return model }).catch(error => {
+      _loadError = error instanceof Error ? error.message : String(error)
+      return null
+    })
   }
+  return _modelPromise
 }
 
 /**
@@ -81,9 +56,7 @@ export async function loadModel(): Promise<any | null> {
  * Only used by the download-model CLI — never called at startup.
  */
 export async function loadModelForDownload(): Promise<any> {
-  stubBrokenSharp()
-  const { pipeline } = await import("@xenova/transformers")
-  return pipeline("feature-extraction", EMBEDDING_MODEL)
+  return loadModelRaw(false)
 }
 
 export function getLoadError(): string | null {
@@ -107,6 +80,7 @@ export async function embed(
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (!a.length || a.length !== b.length || !a.every(Number.isFinite) || !b.every(Number.isFinite)) return 0
   let dot = 0
   let na = 0
   let nb = 0
@@ -163,7 +137,7 @@ export async function getOrComputeEmbeddings(
       // file gone — skip
     }
 
-    if (cached && cached.mtime === mtime) {
+    if (cached && cached.model === EMBEDDING_MODEL && cached.text === getSkillText(skill) && cached.mtime === mtime) {
       result.set(skill.path, cached.embedding)
     } else {
       dirty.push({ path: skill.path, text: getSkillText(skill) })
@@ -179,7 +153,7 @@ export async function getOrComputeEmbeddings(
         try {
           mtime = (await stat(path)).mtimeMs
         } catch {}
-        diskCache.set(path, { mtime, embedding })
+        diskCache.set(path, { mtime, model: EMBEDDING_MODEL, text, embedding })
       } catch {
         // individual skill embedding failed — skip
       }

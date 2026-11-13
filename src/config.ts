@@ -11,6 +11,11 @@
 import { join } from "node:path"
 import { homedir } from "node:os"
 import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
+import { createRequire } from "node:module"
+
+const require = createRequire(import.meta.url)
+const { stripJsoncComments: _stripJsoncComments } = require("../bin/shared.cjs")
 
 // ── Scoring constants ──────────────────────────────────────
 
@@ -30,7 +35,7 @@ export const THRESHOLD = 30
  * Filters out common short words like "a", "an", "to", "do" that
  * would create false positive matches across many skills.
  */
-export const MIN_WORD_LENGTH = 2
+export const MIN_WORD_LENGTH = 3
 
 /**
  * Multiplier applied to score bonuses from skill name matches.
@@ -72,6 +77,13 @@ export const BIGRAM_BONUS = 10
 export const PHRASE_BONUS = 50
 
 /**
+ * Position weight decay: earlier words in the query matter more.
+ * First word gets full weight (×1.0), each subsequent word gets
+ * multiplied by this factor. Compounds with word bonus.
+ */
+export const POSITION_DECAY = 0.9
+
+/**
  * Bonus points added to project-scoped skills that scored > 0.
  * Project skills are more relevant to current work than global ones.
  * Acts as a tiebreaker when a project and global skill have equal scores.
@@ -80,53 +92,15 @@ export const PHRASE_BONUS = 50
  */
 export const SCOPE_BONUS = 5
 
-// ── Semantic embedding constants ──────────────────────────
-
 /**
- * Embedding model to use for semantic skill matching.
- * Multilingual model covering 50+ languages including Chinese and English.
- */
-export const EMBEDDING_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
-
-/**
- * Minimum score gap between top two semantic matches for auto-routing.
- * Cosine similarity is scaled to 0-100, so 15 means a 0.15 cosine gap.
- */
-export const SEMANTIC_THRESHOLD = 15
-
-/**
- * Default minimum semantic score for ambient skill suggestion injection.
- * Cosine similarity * 100. 25 means cosine > 0.25 before a skill appears
- * in the suggested_skills block.
- */
-export const AMBIENT_MIN_SEMANTIC = 25
-
-// ── Ambient suggestion constants ───────────────────────────
-
-/**
- * Default minimum absolute score a skill must reach to be auto-injected
- * as a candidate into the system prompt for the current message.
+ * Skills permanently excluded from routing, regardless of any user configuration.
+ * "triage" must always be excluded to prevent infinite self-referencing loops
+ * where the LLM routes to the triage skill itself recursively.
  *
- * Different from THRESHOLD (which is a top-vs-runner-up GAP for single-skill
- * auto-routing). This is an absolute FLOOR: too low surfaces noise on
- * unrelated messages, too high never surfaces relevant skills.
- *
- * Reference (see scoring.ts): one exact name word ≈ 45+, one exact desc
- * word ≈ 15–30. ~20 means "needs at least one decent hit to surface".
- *
- * Overridable via plugin options (`ambientMinScore`) or env
- * (`OPENCODE_TRIAGE_MIN_SCORE`).
+ * This set cannot be overridden by OPENCODE_TRIAGE_EXCLUDED — that env var
+ * can only add additional exclusions on top of this invariant set.
  */
-export const AMBIENT_MIN_SCORE = 30
-
-/**
- * Default maximum number of candidate skills injected per message (top-K).
- * Higher = better recall but more tokens per turn and more mis-trigger risk.
- *
- * Overridable via plugin options (`ambientMaxCandidates`) or env
- * (`OPENCODE_TRIAGE_MAX_CANDIDATES`).
- */
-export const AMBIENT_MAX_CANDIDATES = 3
+export const ALWAYS_EXCLUDED_SKILLS = new Set(["triage"])
 
 // ── Type definitions ───────────────────────────────────────
 
@@ -158,19 +132,6 @@ export interface ScoredSkill extends SkillEntry {
   matchedBy: string
 }
 
-/**
- * Resolved configuration for the ambient (per-message) skill suggestion feature.
- * Produced by resolveAmbientConfig() from plugin options, config files, env, and defaults.
- */
-export interface AmbientConfig {
-  /** Whether to auto-inject candidate skills into the system prompt per message */
-  autoSuggest: boolean
-  /** Absolute score floor a skill must reach to be injected as a candidate */
-  ambientMinScore: number
-  /** Maximum number of candidates injected per message */
-  ambientMaxCandidates: number
-}
-
 // ── Triage state ───────────────────────────────────────────
 
 /**
@@ -183,28 +144,7 @@ export interface AmbientConfig {
  * @returns Clean JSON text ready for JSON.parse
  */
 export function stripJsoncComments(text: string): string {
-  let result = ""
-  let inString = false
-  let escape = false
-  let i = 0
-  while (i < text.length) {
-    const ch = text[i]
-    if (escape) { result += ch; escape = false; i++; continue }
-    if (ch === "\\" && inString) { result += ch; escape = true; i++; continue }
-    if (ch === '"') { inString = !inString; result += ch; i++; continue }
-    if (!inString && ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++
-      continue
-    }
-    if (!inString && ch === "/" && text[i + 1] === "*") {
-      i += 2
-      while (i < text.length - 1 && !(text[i] === "*" && text[i + 1] === "/")) i++
-      i += 2
-      continue
-    }
-    result += ch; i++
-  }
-  return result
+  return _stripJsoncComments(text)
 }
 
 /**
@@ -216,9 +156,9 @@ export function stripJsoncComments(text: string): string {
  * @param path - Absolute path to config file
  * @returns "on" if autoHide is true, "off" if false, "unknown" otherwise
  */
-export function getTriageStateFromPath(path: string): "on" | "off" | "unknown" {
+export async function getTriageStateFromPath(path: string): Promise<"on" | "off" | "unknown"> {
   try {
-    const raw = readFileSync(path, "utf-8")
+    const raw = await readFile(path, "utf-8")
     const json = JSON.parse(stripJsoncComments(raw))
     const plugin: unknown[] = json.plugin ?? []
     for (const p of plugin) {
@@ -232,12 +172,46 @@ export function getTriageStateFromPath(path: string): "on" | "off" | "unknown" {
 }
 
 /**
- * Returns the config file paths checked for the opencode-triage plugin entry,
- * in priority order: local project config first, then global config.
+ * Resolves the effective triage state from plugin options + config files.
+ *
+ * Priority: plugin options → local config → global config.
+ * Returns "on" | "off" | "unknown" (never configured).
  *
  * @param worktree - Git worktree root or current working directory
- * @returns Ordered list of candidate config file paths
+ * @param options - Plugin options passed from OpenCode runtime
+ * @returns Current triage state
  */
+export async function checkTriageState(
+  worktree: string,
+  options: Record<string, unknown> | undefined
+): Promise<"on" | "off" | "unknown"> {
+  if (options?.autoHide === true)  return "on"
+  if (options?.autoHide === false) return "off"
+  const paths = [
+    join(worktree, ".opencode", "opencode.json"),
+    join(worktree, ".opencode", "opencode.jsonc"),
+    join(homedir(), ".config", "opencode", "opencode.json"),
+    join(homedir(), ".config", "opencode", "opencode.jsonc"),
+  ]
+  for (const p of paths) {
+    const state = await getTriageStateFromPath(p)
+    if (state !== "unknown") return state
+  }
+  return "unknown"
+}
+
+export const AMBIENT_MIN_SCORE = 30
+export const AMBIENT_MAX_CANDIDATES = 3
+
+export interface AmbientConfig {
+  /** Whether to auto-inject candidate skills into the system prompt per message */
+  autoSuggest: boolean
+  /** Absolute score floor a skill must reach to be injected as a candidate */
+  ambientMinScore: number
+  /** Maximum number of candidates injected per message */
+  ambientMaxCandidates: number
+}
+
 export function configPaths(worktree: string): string[] {
   return [
     join(worktree, ".opencode", "opencode.json"),
@@ -266,37 +240,7 @@ export function getTriageOptionsFromPath(path: string): Record<string, unknown> 
   } catch { return null }
 }
 
-/**
- * Resolves the effective triage state from plugin options + config files.
- *
- * Priority: plugin options → local config → global config.
- * Returns "on" | "off" | "unknown" (never configured).
- *
- * @param worktree - Git worktree root or current working directory
- * @param options - Plugin options passed from OpenCode runtime
- * @returns Current triage state
- */
-export async function checkTriageState(
-  worktree: string,
-  options: Record<string, unknown> | undefined
-): Promise<"on" | "off" | "unknown"> {
-  if (options?.autoHide === true)  return "on"
-  if (options?.autoHide === false) return "off"
-  for (const p of configPaths(worktree)) {
-    const state = getTriageStateFromPath(p)
-    if (state !== "unknown") return state
-  }
-  return "on"
-}
 
-// ── Ambient config resolution ──────────────────────────────
-
-/**
- * Coerces a value to boolean. Accepts native booleans, numbers (0/non-0),
- * and common string forms (true/false/1/0/yes/no/on/off, case-insensitive).
- *
- * @returns The boolean, or undefined if the value is absent/unrecognized
- */
 function coerceBool(v: unknown): boolean | undefined {
   if (typeof v === "boolean") return v
   if (typeof v === "number") return v !== 0
@@ -375,13 +319,16 @@ export function resolveAmbientConfig(
     ),
     ambientMinScore: pickNum(
       [options?.ambientMinScore, fileOpts?.ambientMinScore, process.env.OPENCODE_TRIAGE_MIN_SCORE],
-      AMBIENT_MIN_SEMANTIC,
+      AMBIENT_MIN_SCORE,
       { min: 0 }
     ),
     ambientMaxCandidates: pickNum(
       [options?.ambientMaxCandidates, fileOpts?.ambientMaxCandidates, process.env.OPENCODE_TRIAGE_MAX_CANDIDATES],
       AMBIENT_MAX_CANDIDATES,
-      { min: 1, int: true }
+      { min: 1, max: 10, int: true }
     ),
   }
 }
+
+export const EMBEDDING_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+export const AMBIENT_MIN_SEMANTIC = 25
