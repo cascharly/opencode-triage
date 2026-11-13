@@ -27,7 +27,7 @@ import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
 import { scoreSkills } from "./scoring.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { THRESHOLD, ALWAYS_EXCLUDED_SKILLS, checkTriageState, resolveAmbientConfig } from "./config.ts"
+import { ALWAYS_EXCLUDED_SKILLS, checkTriageState, resolveAmbientConfig } from "./config.ts"
 import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
