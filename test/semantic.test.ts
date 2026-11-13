@@ -156,3 +156,64 @@ describe("scoreSkillsSemantic", () => {
     assert.ok(match.matchedBy.startsWith("semantic:"))
   })
 })
+
+describe("scoreSkillsSemantic second pass", () => {
+  const skills = [
+    { name: "backup-restore", desc: "Backup and restore databases", path: "/a", scope: "global" as const },
+    { name: "web-design", desc: "Design responsive web interfaces", path: "/b", scope: "global" as const },
+  ]
+  const first = new Map<string, number[]>([["/a", [1, 0]], ["/b", [0.6, 0.8]]])
+
+  it("averages the first similarity with the best second-pass view", () => {
+    const secondPass = {
+      queryEmbedding: [0, 1],
+      views: [
+        new Map<string, number[]>([["/a", [1, 0]], ["/b", [0, 1]]]),
+        new Map<string, number[]>([["/a", [0.6, 0.8]], ["/b", [1, 0]]]),
+      ],
+    }
+    const scored = scoreSkillsSemantic([1, 0], skills, first, secondPass)
+    const a = scored.find(s => s.name === "backup-restore")!
+    const b = scored.find(s => s.name === "web-design")!
+    assert.equal(a.score, 90) // (1 + max(0, 0.8)) / 2
+    assert.equal(b.score, 80) // (0.6 + max(1, 0)) / 2
+    assert.equal(a.descScore, 90)
+    assert.ok(a.matchedBy.startsWith("semantic2:"))
+  })
+
+  it("keeps the first similarity when a second-pass view is missing", () => {
+    const secondPass = { queryEmbedding: [0, 1], views: [new Map<string, number[]>([["/b", [0, 1]]])] }
+    const scored = scoreSkillsSemantic([1, 0], skills, first, secondPass)
+    const a = scored.find(s => s.name === "backup-restore")!
+    assert.equal(a.score, 100)
+    assert.ok(a.matchedBy.startsWith("semantic:"))
+  })
+})
+
+it("ranks implicit queries with the cached second-pass model", {
+  skip: process.env.TRIAGE_TEST_SEMANTIC_MODEL !== "1",
+}, async () => {
+  const { SECOND_PASS_MODEL } = await import("../src/config.ts")
+  const { SECOND_PASS_VIEWS } = await import("../src/embeddings.ts")
+  const firstModel = await loadModel()
+  const secondModel = await loadModel(SECOND_PASS_MODEL)
+  assert.ok(firstModel && secondModel, "Run download-model first to populate both cached models")
+  const skills = [
+    { name: "payment-disputes", desc: "Respond to card chargebacks and payment disputes with evidence before the deadline.", path: "/disputes", scope: "global" as const },
+    { name: "stripe-refunds", desc: "Issue Stripe payment refunds and investigate duplicate customer charges.", path: "/refunds", scope: "global" as const },
+    { name: "web-design", desc: "Design responsive websites and improve CSS layouts.", path: "/design", scope: "global" as const },
+  ]
+  const first = new Map<string, number[]>()
+  for (const skill of skills) first.set(skill.path, await embed(firstModel, `${skill.name}: ${skill.desc}`))
+  const views = await Promise.all(SECOND_PASS_VIEWS.map(async view => {
+    const vectors = new Map<string, number[]>()
+    for (const skill of skills) vectors.set(skill.path, await embed(secondModel, view.text(skill)))
+    return vectors
+  }))
+  const query = "The bank says a customer contested a charge and we must send proof"
+  const ranked = scoreSkillsSemantic(await embed(firstModel, query), skills, first, { queryEmbedding: await embed(secondModel, query), views })
+    .sort((a, b) => b.score - a.score)
+  assert.equal(ranked[0].name, "payment-disputes")
+  assert.ok(ranked[0].matchedBy.startsWith("semantic2:"))
+  assert.ok(ranked[0].score >= 30)
+})

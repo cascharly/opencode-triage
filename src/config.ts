@@ -327,4 +327,6 @@ export function resolveAmbientConfig(
 }
 
 export const EMBEDDING_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
+/** Optional second-pass model; its score is averaged with EMBEDDING_MODEL when cached. */
+export const SECOND_PASS_MODEL = "Xenova/paraphrase-multilingual-mpnet-base-v2"
 export const AMBIENT_MIN_SEMANTIC = 25

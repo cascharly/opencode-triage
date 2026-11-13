@@ -44,7 +44,7 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 | `/triage status` | See hook state and skill visibility |
 | `/triage dedupe` | Remove project-level duplicates of global skills |
 | `/triage compare` | Catalog token savings estimate (excludes variable suggestions) |
-| `/triage download-model` | Download the optional multilingual model once, then restart OpenCode |
+| `/triage download-model` | Download the optional multilingual models once, then restart OpenCode |
 
 > **Note:** Skills are hidden via hooks at the LLM prompt level — `SKILL.md` files stay intact on disk, so other AI tools (Cursor, Claude Code, Windsurf) still see them. File renaming (`SKILL.md` ↔ `SKILL.md.disabled`) is only used as a fallback for older OpenCode versions without hook support. When files are renamed to `.disabled`, they will also be hidden from other AI tools that scan the same directories.
 
@@ -56,6 +56,7 @@ Install opencode-triage (https://github.com/cascharly/opencode-triage) — a det
 | `--quiet` | on/off | Suppress non-error output |
 | `--dry-run` | dedupe | Preview changes without renaming |
 | `--all` | status | Show full skill list without truncation |
+| `--no-second-pass` | download-model | Download only the smaller first-pass model |
 
 All commands also work in your terminal: `npx opencode-triage <command>`. No OpenCode session needed.
 
@@ -90,7 +91,7 @@ Plugin: scans filesystem → scores skills → returns best match
   Returns a scored shortlist; the model chooses which skill to load.
 ```
 
-Matching requires no extra LLM API calls. Optional semantic matching runs a cached model locally; keyword matching is used when the model is unavailable.
+Matching requires no extra LLM API calls. Optional semantic matching runs cached models locally in two consecutive evaluations; keyword matching is used when no model is available.
 
 ### Spell Correction
 
@@ -215,7 +216,7 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 
 1. **Discover** — Scans directories for skill files, extracts name and description from frontmatter. Results are cached in memory (5s TTL) so CLI toggles are picked up without restart. The cache stores only skill metadata (name, description, path) — minimal RAM usage, typically a few KB even with dozens of skills.
 
-2. **Match** — Scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate. IDF weighting downweights common words and boosts rare, discriminating terms. Bigram and exact phrase bonuses reward skills whose descriptions match query phrasing. Position decay weights earlier query words more heavily. Lightweight stemming normalizes inflected forms (`vulnerabilities` → `vulnerability`). Project-scoped skills get a small tiebreaker bonus (+5) over equally-matched global skills.
+2. **Match** — With the optional models cached, matching uses multilingual embeddings in two consecutive evaluations (see [Optional multilingual semantic matching](#optional-multilingual-semantic-matching)). Otherwise it scores query keywords against each skill — exact word match = 15pts, partial = 10pts. Found in name → ×3, found in description → ×1. Name matches dominate. IDF weighting downweights common words and boosts rare, discriminating terms. Bigram and exact phrase bonuses reward skills whose descriptions match query phrasing. Position decay weights earlier query words more heavily. Lightweight stemming normalizes inflected forms (`vulnerabilities` → `vulnerability`). Project-scoped skills get a small tiebreaker bonus (+5) over equally-matched global skills.
 
 3. **Spell Correction** — If a query word (length ≥ 4) has no exact match in any skill name or description, the plugin computes Levenshtein distance against all skill vocabulary and suggests the closest match (distance ≤ 2). The hint is injected into the tool result for the LLM to self-correct silently.
 
@@ -231,7 +232,8 @@ The triage router is a registered plugin tool. When called, it runs a determinis
 |------|---------|
 | `index.ts` | Plugin entry point, tool registration, hook setup |
 | `discovery.ts` | File scanning, skill reading, rename migration |
-| `scoring.ts` | Scoring pipeline: IDF, bigram/phrase bonuses, stemming, position decay |
+| `scoring.ts` | Scoring pipeline: IDF, bigram/phrase bonuses, stemming, position decay, two-pass semantic scores |
+| `embeddings.ts` | Optional local embedding models and on-disk vector caches |
 | `spellcheck.ts` | Levenshtein distance, spell correction suggestions |
 | `config.ts` | Constants, types, triage state, JSONC parsing |
 | `remote.ts` | Remote skill search (registry, superpowers) |
@@ -271,8 +273,15 @@ Automatic suggestions use only the current user message and expose at most three
 
 ### Optional multilingual semantic matching
 
-Run `npx opencode-triage download-model` once to download the local multilingual embedding model, then restart OpenCode. The plugin uses only cached model files and never downloads a model during a chat. If optional dependencies, the model, or inference are unavailable, routing falls back to keyword matching. Set the plugin option `semanticMatching: false` to use keyword matching explicitly. Skill discovery retains automatic cache invalidation; `rescan` also refreshes it on demand.
+Run `npx opencode-triage download-model` once to download the local multilingual embedding models, then restart OpenCode. The plugin uses only cached model files and never downloads a model during a chat. If optional dependencies, the model, or inference are unavailable, routing falls back to keyword matching. Set the plugin option `semanticMatching: false` to use keyword matching explicitly. Skill discovery retains automatic cache invalidation; `rescan` also refreshes it on demand.
 
-The model cache is `~/.cache/opencode-triage/models/`. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`. The optional model runtime is `@huggingface/transformers`; a modern Node.js runtime (22+ recommended) is needed for model downloads. Basic CLI commands retain Node.js 18+ support.
+Semantic matching runs two consecutive evaluations:
+
+1. `paraphrase-multilingual-MiniLM-L12-v2` (q8, about 118 MB) compares the message with each skill's `name: description`.
+2. When `paraphrase-multilingual-mpnet-base-v2` (q8, about 280 MB) is also cached, it compares the message with three views of each skill: the description, the name as words, and both together. A skill's score is the average of the first similarity and the best second-pass view. The usual thresholds apply (`ambientMinScore`, default 30).
+
+Second-pass skill vectors are built in the background the first time, about a minute for 500 skills on a four-thread laptop CPU. Until then, and whenever the second model is absent or fails, the first model scores alone. Afterwards the second pass adds roughly 30 ms per message and about 540 MiB of resident memory. Use `download-model --no-second-pass` to download only the first model, or set the plugin option `secondPassMatching: false` to disable the second pass.
+
+The model cache is `~/.cache/opencode-triage/models/`. Skill vectors are cached in `~/.cache/opencode-triage/embeddings.json`, with second-pass vectors in a separate `embeddings-<model>.json` file. To run the optional real-model integration test after downloading, set `TRIAGE_TEST_SEMANTIC_MODEL=1` and run `npm test`. The optional model runtime is `@huggingface/transformers`; a modern Node.js runtime (22+ recommended) is needed for model downloads. Basic CLI commands retain Node.js 18+ support.
 
 `dedupe --json` requires `--dry-run` when duplicates exist; omit `--json` to choose interactively which copy to remove.

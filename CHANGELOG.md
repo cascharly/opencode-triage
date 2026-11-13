@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-13
+
 ### Added
 
+- Optional second semantic pass with `paraphrase-multilingual-mpnet-base-v2`, suggested in issue #10. Each skill's score averages the first model's similarity with the best of three second-pass views (description, name words, both), improving matches for requests that do not name the skill's tools.
+- `download-model` now downloads both models; `--no-second-pass` downloads only the first. The plugin option `secondPassMatching: false` disables the second pass.
+- Second-pass vectors are built in the background and cached in a separate per-model file; until they are ready, or if the second model is unavailable, the first model scores alone. With both models loaded, expect about 30 ms more per message and about 540 MiB more resident memory.
 - Automatic OpenCode V2 support through the native `./server` package entrypoint, while preserving the original callable V1 root entrypoint for older loaders.
 - V2 tool registration, native skill IDs, request-scoped suggestions, catalog hiding, permission checks, cancellation, and cleanup using the shared router.
 - Installed-package compatibility checks under Bun with V1 SDKs 1.14.17 and 1.19.5 and the official V2 SDK 2.3.0 resolver.

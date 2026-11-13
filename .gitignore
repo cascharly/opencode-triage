@@ -8,3 +8,8 @@ skills-lock.json
 .npx-cache/
 
 .codegraph/
+
+# Internal working notes and evaluations (not published)
+HANDOFF.md
+ROADMAP.md
+benchmarks/

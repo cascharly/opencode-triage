@@ -333,21 +333,31 @@ function checkForUpdate() {
 // ── help ──────────────────────────────────────────────────
 
 async function downloadModel() {
-  const MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
-  if (!isQuiet && !isJson) console.log(`Downloading embedding model: ${MODEL}`)
-  if (!isQuiet && !isJson) console.log("This may take 30-60s on first run (~118MB). Subsequent starts are instant.\n")
+  // Keep in sync with EMBEDDING_MODEL and SECOND_PASS_MODEL in src/config.ts.
+  const MODELS = [
+    { id: "Xenova/paraphrase-multilingual-MiniLM-L12-v2", size: "~118MB", role: "first pass" },
+    { id: "Xenova/paraphrase-multilingual-mpnet-base-v2", size: "~280MB", role: "second pass" },
+  ]
+  const selected = FLAGS.includes("--no-second-pass") ? MODELS.slice(0, 1) : MODELS
+  const MODEL = selected.map(m => m.id).join(", ")
+  if (!isQuiet && !isJson) console.log(`Downloading embedding models: ${MODEL}`)
+  if (!isQuiet && !isJson) console.log(`This may take a few minutes on first run (${selected.map(m => `${m.role} ${m.size}`).join(", ")}). Subsequent starts are instant.\n`)
 
   try {
     const { pipeline } = await import("@huggingface/transformers")
-    if (!isQuiet && !isJson) console.log("Loading model...")
-    const model = await pipeline("feature-extraction", MODEL, { cache_dir: path.join(HOMEDIR, ".cache", "opencode-triage", "models"), dtype: "q8" })
-    if (!isQuiet && !isJson) console.log("Warming up...")
-    const out = await model("test", { pooling: "mean", normalize: true })
-    if (!isQuiet && !isJson) console.log(`OK — embedding dimension: ${out.data.length}`)
+    const dims = {}
+    for (const { id, role } of selected) {
+      if (!isQuiet && !isJson) console.log(`Loading ${role} model ${id}...`)
+      const model = await pipeline("feature-extraction", id, { cache_dir: path.join(HOMEDIR, ".cache", "opencode-triage", "models"), dtype: "q8" })
+      const out = await model("test", { pooling: "mean", normalize: true })
+      dims[id] = out.data.length
+      await model.dispose?.()
+      if (!isQuiet && !isJson) console.log(`OK — embedding dimension: ${out.data.length}`)
+    }
     if (isJson) {
-      console.log(JSON.stringify({ status: "ok", model: MODEL, dims: out.data.length }))
+      console.log(JSON.stringify({ status: "ok", models: selected.map(m => m.id), dims }))
     } else {
-      console.log(`\nModel ready. Semantic cross-lingual matching is now available.`)
+      console.log(`\nModels ready. Restart OpenCode to use semantic cross-lingual matching${selected.length > 1 ? " with the second pass" : ""}.`)
     }
   } catch (e) {
     const msg = e.message ?? String(e)
@@ -371,10 +381,10 @@ async function downloadModel() {
         console.error(`  1. On a different network, run: npx opencode-triage download-model`)
         console.error(`     This caches the model to ~/.cache/opencode-triage/models/`)
         console.error(`  2. Or manually download and place files in:`)
-        console.error(`     ~/.cache/opencode-triage/models/Xenova/paraphrase-multilingual-MiniLM-L12-v2/`)
+        console.error(`     ~/.cache/opencode-triage/models/Xenova/<model-name>/`)
         console.error()
       }
-      console.error("Triage will fall back to keyword scoring without semantic matching.")
+      console.error("Triage falls back to the first-pass model alone, or to keyword scoring without any model.")
     }
     process.exit(1)
   }
@@ -386,12 +396,12 @@ function showHelp() {
     console.log(JSON.stringify({
       version: CURRENT_VERSION,
       commands: ["on", "off", "mode", "status", "dedupe", "compare", "download-model", "version", "help"],
-      flags: ["--local", "--global", "--both", "--json", "--quiet", "--all", "--dry-run"],
+      flags: ["--local", "--global", "--both", "--json", "--quiet", "--all", "--dry-run", "--no-second-pass"],
     }, null, 2))
     return
   }
   const cmdCol = 16
-  const flagCol = 12
+  const flagCol = 18
   const cmd = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(cmdCol - name.length) + desc
   const flag = (name, desc) => "  " + BOLD + name + RESET + " ".repeat(flagCol - name.length) + desc
   console.log()
@@ -408,7 +418,7 @@ function showHelp() {
   console.log(DIM + "  SKILL.md files stay intact — other AI tools can still read them." + RESET)
   console.log(DIM + "  Hooks handle hiding at the LLM prompt level, no file rename needed." + RESET)
   console.log()
-  console.log(cmd("download-model", "Download the optional local multilingual embedding model"))
+  console.log(cmd("download-model", "Download the optional local multilingual embedding models"))
   console.log()
   console.log(BOLD + "Scope" + RESET + DIM + "  (override default: both scopes)" + RESET)
   console.log()
@@ -418,6 +428,7 @@ function showHelp() {
   console.log(flag("--quiet", "Suppress non-error output (on/off)"))
   console.log(flag("--all", "Show full skill list without truncation (status)"))
   console.log(flag("--dry-run", "Preview changes without applying (dedupe)"))
+  console.log(flag("--no-second-pass", "Download only the first-pass model (download-model)"))
   console.log()
   console.log("  " + BOLD + "Uninstall:" + RESET + " ".repeat(flagCol - "Uninstall:".length) + "npm uninstall -g opencode-triage")
   console.log("  " + BOLD + "Docs:" + RESET + " ".repeat(flagCol - "Docs:".length) + "https://github.com/cascharly/opencode-triage")

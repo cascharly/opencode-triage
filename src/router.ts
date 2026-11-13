@@ -22,10 +22,10 @@ import { join } from "node:path"
 import { watch } from "node:fs"
 import { createRequire } from "node:module"
 import { buildSkillLocations, discoverAllSkills, renameSkills, readSkillContent } from "./discovery.ts"
-import { scoreSkills, scoreSkillsSemantic } from "./scoring.ts"
-import { loadModel, embed, getOrComputeEmbeddings } from "./embeddings.ts"
+import { scoreSkills, scoreSkillsSemantic, type SecondPass } from "./scoring.ts"
+import { loadModel, embed, getOrComputeEmbeddings, getOrComputeViewEmbeddings, SECOND_PASS_VIEWS } from "./embeddings.ts"
 import { suggestCorrections } from "./spellcheck.ts"
-import { AMBIENT_MIN_SEMANTIC, ALWAYS_EXCLUDED_SKILLS, checkTriageState, resolveAmbientConfig } from "./config.ts"
+import { AMBIENT_MIN_SEMANTIC, ALWAYS_EXCLUDED_SKILLS, SECOND_PASS_MODEL, checkTriageState, resolveAmbientConfig } from "./config.ts"
 import type { SkillEntry, AmbientConfig } from "./config.ts"
 
 const require = createRequire(import.meta.url)
@@ -224,6 +224,43 @@ export async function createRouter({ worktree, client }: RouterInput, options?: 
   // entries from ALWAYS_EXCLUDED_SKILLS. This guarantees no infinite self-referencing loops
   // regardless of user configuration.
   let semanticCache: { skills: SkillEntry[]; vectors: Map<string, number[]> } | null = null
+
+  // Second evaluation with a stronger cached model. Its skill vectors are built in
+  // the background so a large catalog never blocks a chat turn; until they are
+  // ready (or if the model is absent or fails) the first model scores alone.
+  const secondPassSignal = { cancelled: false }
+  let secondPassReady: { signature: string; views: Map<string, number[]>[] } | null = null
+  let secondPassBuilding: string | null = null
+  const catalogSignature = (skills: SkillEntry[]) => skills.map(s => `${s.path}\0${s.name}\0${s.desc}`).join("\n")
+
+  function startSecondPass(skills: SkillEntry[], signature: string): void {
+    secondPassBuilding = signature
+    void (async () => {
+      try {
+        const model = await loadModel(SECOND_PASS_MODEL)
+        if (!model || secondPassSignal.cancelled) return
+        const views = await getOrComputeViewEmbeddings(skills, model, SECOND_PASS_MODEL, SECOND_PASS_VIEWS, secondPassSignal)
+        if (views.every(view => view.size === skills.length)) secondPassReady = { signature, views }
+      } catch {
+        // Optional: the first model keeps routing on its own.
+      } finally {
+        secondPassBuilding = null
+      }
+    })()
+  }
+
+  async function getSecondPass(query: string, skills: SkillEntry[]): Promise<SecondPass | undefined> {
+    if (options?.secondPassMatching === false) return undefined
+    const signature = catalogSignature(skills)
+    if (secondPassReady?.signature !== signature) {
+      if (secondPassBuilding === null) startSecondPass(skills, signature)
+      return undefined
+    }
+    const model = await loadModel(SECOND_PASS_MODEL)
+    if (!model) return undefined
+    return { queryEmbedding: await embed(model, query), views: secondPassReady.views }
+  }
+
   async function scoreAvailableSkills(query: string, skills: SkillEntry[]) {
     if (options?.semanticMatching === false) return scoreSkills(query, skills)
     try {
@@ -234,7 +271,13 @@ export async function createRouter({ worktree, client }: RouterInput, options?: 
       }
       if (semanticCache.vectors.size !== skills.length) return scoreSkills(query, skills)
       const queryVector = await embed(model, query)
-      return scoreSkillsSemantic(queryVector, skills, semanticCache.vectors)
+      let secondPass: SecondPass | undefined
+      try {
+        secondPass = await getSecondPass(query, skills)
+      } catch {
+        secondPass = undefined
+      }
+      return scoreSkillsSemantic(queryVector, skills, semanticCache.vectors, secondPass)
         .map(skill => skill.descScore >= AMBIENT_MIN_SEMANTIC ? skill : { ...skill, score: 0 })
     } catch {
       return scoreSkills(query, skills)
@@ -372,6 +415,7 @@ export async function createRouter({ worktree, client }: RouterInput, options?: 
     dispose: async () => {
       for (const watcher of watchers) watcher.close()
       watchers = []
+      secondPassSignal.cancelled = true
     },
     tool: {
       /**

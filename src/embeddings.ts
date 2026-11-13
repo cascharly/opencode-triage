@@ -9,6 +9,10 @@
  * returns null from loadModel() — the caller should fall back to keyword
  * scoring via scoreSkills().
  *
+ * An optional second-pass model rescores with several skill views; its vectors
+ * live in a separate file per model under "<view>|<abs-path>" keys, so the
+ * first model's frequent cache reads stay small.
+ *
  * Cache location: ~/.cache/opencode-triage/embeddings.json
  * Format: { "<abs-path>": { "mtime": 1718963200000, "embedding": [0.12, ...] } }
  */
@@ -22,45 +26,52 @@ import { EMBEDDING_MODEL } from "./config.ts"
 const CACHE_DIR = join(homedir(), ".cache", "opencode-triage")
 const CACHE_FILE = join(CACHE_DIR, "embeddings.json")
 
+function cacheFile(modelId: string): string {
+  return modelId === EMBEDDING_MODEL ? CACHE_FILE : join(CACHE_DIR, `embeddings-${modelId.replace(/[^\w.-]+/g, "_")}.json`)
+}
+
 type EmbedCacheEntry = { mtime: number; model: string; text: string; embedding: number[] }
 type EmbedDiskCache = Map<string, EmbedCacheEntry>
 
-let _model: any | null = null
-let _modelPromise: Promise<any | null> | null = null
-let _loadError: string | null = null
+const _models = new Map<string, any>()
+const _modelPromises = new Map<string, Promise<any | null>>()
+const _loadErrors = new Map<string, string>()
 
-async function loadModelRaw(localOnly: boolean): Promise<any> {
+async function loadModelRaw(modelId: string, localOnly: boolean): Promise<any> {
   const { pipeline } = await import("@huggingface/transformers")
   const opts: Record<string, unknown> = { cache_dir: join(CACHE_DIR, "models"), dtype: "q8" }
   if (localOnly) opts.local_files_only = true
-  return pipeline("feature-extraction", EMBEDDING_MODEL, opts)
+  return pipeline("feature-extraction", modelId, opts)
 }
 
 /**
- * Loads the embedding model from local cache only (no network).
+ * Loads an embedding model from local cache only (no network).
  * Returns null if not cached, deps missing, or initialization fails.
  */
-export async function loadModel(): Promise<any | null> {
-  if (_model) return _model
-  if (!_modelPromise) {
-    _modelPromise = loadModelRaw(true).then(model => { _model = model; return model }).catch(error => {
-      _loadError = error instanceof Error ? error.message : String(error)
+export async function loadModel(modelId: string = EMBEDDING_MODEL): Promise<any | null> {
+  const loaded = _models.get(modelId)
+  if (loaded) return loaded
+  let promise = _modelPromises.get(modelId)
+  if (!promise) {
+    promise = loadModelRaw(modelId, true).then(model => { _models.set(modelId, model); return model }).catch(error => {
+      _loadErrors.set(modelId, error instanceof Error ? error.message : String(error))
       return null
     })
+    _modelPromises.set(modelId, promise)
   }
-  return _modelPromise
+  return promise
 }
 
 /**
- * Loads or downloads the embedding model (allows network).
+ * Loads or downloads an embedding model (allows network).
  * Only used by the download-model CLI — never called at startup.
  */
-export async function loadModelForDownload(): Promise<any> {
-  return loadModelRaw(false)
+export async function loadModelForDownload(modelId: string = EMBEDDING_MODEL): Promise<any> {
+  return loadModelRaw(modelId, false)
 }
 
-export function getLoadError(): string | null {
-  return _loadError
+export function getLoadError(modelId: string = EMBEDDING_MODEL): string | null {
+  return _loadErrors.get(modelId) ?? null
 }
 
 /**
@@ -93,9 +104,9 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom
 }
 
-async function loadDiskCache(): Promise<EmbedDiskCache> {
+async function loadDiskCache(file: string): Promise<EmbedDiskCache> {
   try {
-    const raw = await readFile(CACHE_FILE, "utf-8")
+    const raw = await readFile(file, "utf-8")
     const obj = JSON.parse(raw) as Record<string, EmbedCacheEntry>
     return new Map(Object.entries(obj))
   } catch {
@@ -103,49 +114,90 @@ async function loadDiskCache(): Promise<EmbedDiskCache> {
   }
 }
 
-async function saveDiskCache(cache: EmbedDiskCache): Promise<void> {
-  try {
-    await mkdir(CACHE_DIR, { recursive: true })
-    const obj: Record<string, EmbedCacheEntry> = {}
-    for (const [k, v] of cache) {
-      obj[k] = v
+// Serializes read-merge-write cycles so concurrent computations never drop entries.
+let _saveChain: Promise<void> = Promise.resolve()
+
+function saveDiskCache(file: string, updates: EmbedDiskCache): Promise<void> {
+  _saveChain = _saveChain.then(async () => {
+    try {
+      const cache = await loadDiskCache(file)
+      for (const [k, v] of updates) cache.set(k, v)
+      await mkdir(CACHE_DIR, { recursive: true })
+      await writeFile(file, JSON.stringify(Object.fromEntries(cache)), "utf-8")
+    } catch {
+      // non-critical — cache will be rebuilt next time
     }
-    await writeFile(CACHE_FILE, JSON.stringify(obj), "utf-8")
-  } catch {
-    // non-critical — cache will be rebuilt next time
-  }
+  })
+  return _saveChain
 }
 
 function getSkillText(skill: SkillEntry): string {
   return `${skill.name}: ${skill.desc}`
 }
 
-export async function getOrComputeEmbeddings(
+export interface SkillView {
+  id: string
+  text: (skill: SkillEntry) => string
+}
+
+const BACKGROUND_YIELD_MS = 5
+
+const PRIMARY_VIEW: SkillView = { id: "current", text: getSkillText }
+const nameWords = (skill: SkillEntry) => skill.name.replace(/[-_]/g, " ")
+
+/** Skill views rescored by the second-pass model; a skill's score is the best view. */
+export const SECOND_PASS_VIEWS: SkillView[] = [
+  { id: "desc", text: skill => skill.desc },
+  { id: "words", text: nameWords },
+  { id: "wordsDesc", text: skill => `${nameWords(skill)}: ${skill.desc}` },
+]
+
+function cacheKey(modelId: string, view: SkillView, path: string): string {
+  // The primary model keeps its original path-only keys for cache compatibility.
+  return modelId === EMBEDDING_MODEL && view.id === PRIMARY_VIEW.id ? path : `${view.id}|${path}`
+}
+
+/**
+ * Returns one path-to-vector map per view, reusing disk-cached vectors whose
+ * model, text and file mtime still match, and computing the rest.
+ */
+export async function getOrComputeViewEmbeddings(
   skills: SkillEntry[],
-  model: any
-): Promise<Map<string, number[]>> {
-  const diskCache = await loadDiskCache()
-  const result = new Map<string, number[]>()
-  const dirty: Array<{ path: string; text: string }> = []
+  model: any,
+  modelId: string,
+  views: SkillView[],
+  signal?: { cancelled: boolean }
+): Promise<Map<string, number[]>[]> {
+  const file = cacheFile(modelId)
+  const diskCache = await loadDiskCache(file)
+  const results = views.map(() => new Map<string, number[]>())
+  const dirty: Array<{ key: string; path: string; text: string; result: Map<string, number[]> }> = []
 
   for (const skill of skills) {
-    const cached = diskCache.get(skill.path)
     let mtime = 0
     try {
       mtime = (await stat(skill.path)).mtimeMs
     } catch {
       // file gone — skip
     }
-
-    if (cached && cached.model === EMBEDDING_MODEL && cached.text === getSkillText(skill) && cached.mtime === mtime) {
-      result.set(skill.path, cached.embedding)
-    } else {
-      dirty.push({ path: skill.path, text: getSkillText(skill) })
-    }
+    views.forEach((view, i) => {
+      const key = cacheKey(modelId, view, skill.path)
+      const text = view.text(skill)
+      const cached = diskCache.get(key)
+      if (cached && cached.model === modelId && cached.text === text && cached.mtime === mtime) {
+        results[i].set(skill.path, cached.embedding)
+      } else {
+        dirty.push({ key, path: skill.path, text, result: results[i] })
+      }
+    })
   }
 
   if (dirty.length > 0) {
-    for (const { path, text } of dirty) {
+    const updates: EmbedDiskCache = new Map()
+    for (const { key, path, text, result } of dirty) {
+      if (signal?.cancelled) break
+      // Background builds yield between items so chat turns are not starved.
+      if (signal) await new Promise(resolve => setTimeout(resolve, BACKGROUND_YIELD_MS))
       try {
         const embedding = await embed(model, text)
         result.set(path, embedding)
@@ -153,13 +205,22 @@ export async function getOrComputeEmbeddings(
         try {
           mtime = (await stat(path)).mtimeMs
         } catch {}
-        diskCache.set(path, { mtime, model: EMBEDDING_MODEL, text, embedding })
+        updates.set(key, { mtime, model: modelId, text, embedding })
       } catch {
         // individual skill embedding failed — skip
       }
     }
-    await saveDiskCache(diskCache)
+    if (updates.size > 0) await saveDiskCache(file, updates)
   }
 
-  return result
+  return results
 }
+
+export async function getOrComputeEmbeddings(
+  skills: SkillEntry[],
+  model: any
+): Promise<Map<string, number[]>> {
+  const [vectors] = await getOrComputeViewEmbeddings(skills, model, EMBEDDING_MODEL, [PRIMARY_VIEW])
+  return vectors
+}
+

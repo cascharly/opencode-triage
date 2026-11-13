@@ -1,6 +1,6 @@
 {
   "name": "opencode-triage",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Skill discovery for OpenCode with automatic suggestions, keyword matching, and optional local multilingual embeddings",
   "license": "MIT",
   "author": "Carlos Spagnoletti",

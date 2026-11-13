@@ -385,6 +385,13 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
   return skills.map(skill => scoreSingleSkill(skill, ctx))
 }
 
+/** Optional second evaluation: a stronger model scored against several skill views. */
+export interface SecondPass {
+  queryEmbedding: number[]
+  /** One path-to-vector map per skill view; the best view counts. */
+  views: Map<string, number[]>[]
+}
+
 /**
  * Scores all skills using semantic embedding similarity.
  *
@@ -393,22 +400,36 @@ export function scoreSkills(query: string, skills: SkillEntry[]): ScoredSkill[] 
  * Only the scope bonus is retained — all other keyword signals (IDF, bigram,
  * phrase, stemming) are captured by the multilingual embedding model.
  *
+ * With a second pass, a skill's similarity is the average of the first model's
+ * similarity and the second model's best view. Skills missing any second-pass
+ * vector keep the first-model similarity.
+ *
  * @param queryEmbedding - Pre-computed embedding of the user's query
  * @param skills - Array of discovered skills
  * @param skillEmbeddings - Map from skill path to pre-computed embedding
+ * @param secondPass - Optional second-model query embedding and view vectors
  * @returns Scored skills sorted by relevance (caller should sort by score desc)
  */
 export function scoreSkillsSemantic(
   queryEmbedding: number[],
   skills: SkillEntry[],
-  skillEmbeddings: Map<string, number[]>
+  skillEmbeddings: Map<string, number[]>,
+  secondPass?: SecondPass
 ): ScoredSkill[] {
   return skills.map(skill => {
     const emb = skillEmbeddings.get(skill.path)
     if (!emb) return { ...skill, score: 0, descScore: 0, matchedBy: "" }
 
-    let score = cosineSimilarity(queryEmbedding, emb) * 100
-
+    let similarity = cosineSimilarity(queryEmbedding, emb)
+    let label = "semantic"
+    const second = secondPass?.views.map(view => view.get(skill.path))
+    if (second && second.length > 0 && second.every(v => v !== undefined)) {
+      const best = Math.max(...second.map(v => cosineSimilarity(secondPass!.queryEmbedding, v!)))
+      similarity = (similarity + best) / 2
+      label = "semantic2"
+    }
+    const descScore = Math.round(similarity * 100)
+    let score = similarity * 100
     if (skill.scope === "project" && score > 0) {
       score += SCOPE_BONUS
     }
@@ -416,8 +437,8 @@ export function scoreSkillsSemantic(
     return {
       ...skill,
       score: Math.round(score),
-      descScore: Math.round(cosineSimilarity(queryEmbedding, emb) * 100),
-      matchedBy: `semantic:${Math.round(score)}`,
+      descScore,
+      matchedBy: `${label}:${Math.round(score)}`,
     }
   })
 }
